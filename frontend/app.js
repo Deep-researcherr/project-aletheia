@@ -45,7 +45,7 @@ form.addEventListener("submit", async (event) => {
 
     try {
 
-        const response = await fetch("/research", {
+        const response = await fetch("http://127.0.0.1:8000/research", {
 
             method: "POST",
 
@@ -160,8 +160,14 @@ function displayResults(data) {
 
     // Final report
 
+    const reportFailed = Boolean(
+        data.report === null && data.report_error
+    );
+
     report.textContent =
-        data.report;
+        reportFailed ? data.report_error : data.report;
+
+    report.classList.toggle("error", reportFailed);
 
 
     // Scroll to results

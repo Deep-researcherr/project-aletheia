@@ -2,7 +2,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from google.genai.errors import APIError
+from google.genai.errors import APIError, ClientError
 
 from backend import main
 from backend.tools import github, news, serpapi
@@ -24,7 +24,12 @@ def client():
 @pytest.fixture
 def pipeline(monkeypatch):
     """Replace the whole pipeline, so no Gemini or search API call is made."""
-    state = {"search_errors": {}, "research_errors": {}, "report_calls": []}
+    state = {
+        "search_errors": {},
+        "research_errors": {},
+        "report_error": None,
+        "report_calls": [],
+    }
 
     def fake_plan(question):
         return json.dumps(PLAN)
@@ -48,6 +53,8 @@ def pipeline(monkeypatch):
 
     def fake_report(question, findings):
         state["report_calls"].append({"question": question, "findings": findings})
+        if state["report_error"] is not None:
+            raise state["report_error"]
         return "Final research report"
 
     monkeypatch.setattr(main, "create_research_plan", fake_plan)
@@ -188,6 +195,88 @@ def test_planner_502_handling_is_preserved(client, monkeypatch, planner):
 
 def test_unexpected_programming_error_is_not_swallowed(client, pipeline):
     pipeline["search_errors"]["What is FastAPI?"] = AttributeError("result shape is wrong")
+
+    with pytest.raises(AttributeError):
+        client.post("/research", json={"question": QUESTION})
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ClientError(
+            429,
+            "RESOURCE_EXHAUSTED: Quota exceeded for quota metric "
+            "'Generate requests'.",
+        ),
+        APIError(503, "model overloaded"),
+    ],
+    ids=["quota-exceeded", "server-error"],
+)
+def test_report_gemini_error_returns_a_null_report(client, pipeline, error):
+    pipeline["report_error"] = error
+
+    response = client.post("/research", json={"question": QUESTION})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["report"] is None
+    assert body["report_error"].startswith("Research report synthesis failed: ")
+    assert type(error).__name__ in body["report_error"]
+    assert body["findings"] == [
+        {"subquestion": subquestion, "finding": f"Finding for: {subquestion}"}
+        for subquestion in SUBQUESTIONS
+    ]
+
+
+def test_report_quota_error_names_the_quota_problem(client, pipeline):
+    pipeline["report_error"] = ClientError(
+        429,
+        "RESOURCE_EXHAUSTED: Quota exceeded for quota metric "
+        "'Generate requests'.",
+    )
+
+    body = client.post("/research", json={"question": QUESTION}).json()
+
+    assert "RESOURCE_EXHAUSTED" in body["report_error"]
+    assert "Quota exceeded" in body["report_error"]
+
+
+def test_report_error_keeps_successful_and_failed_findings(client, pipeline):
+    pipeline["search_errors"]["Why use FastAPI?"] = serpapi.SerpApiError("google is down")
+    pipeline["report_error"] = ClientError(429, "RESOURCE_EXHAUSTED")
+
+    body = client.post("/research", json={"question": QUESTION}).json()
+
+    assert body["findings"] == [
+        {"subquestion": "What is FastAPI?", "finding": "Finding for: What is FastAPI?"},
+        {
+            "subquestion": "Why use FastAPI?",
+            "finding": None,
+            "error": "search failed: SerpApiError: google is down",
+        },
+        {
+            "subquestion": "How to deploy FastAPI?",
+            "finding": "Finding for: How to deploy FastAPI?",
+        },
+    ]
+    assert pipeline["report_calls"][0]["findings"] == [
+        {"subquestion": "What is FastAPI?", "finding": "Finding for: What is FastAPI?"},
+        {
+            "subquestion": "How to deploy FastAPI?",
+            "finding": "Finding for: How to deploy FastAPI?",
+        },
+    ]
+
+
+def test_report_error_is_omitted_on_success(client, pipeline):
+    body = client.post("/research", json={"question": QUESTION}).json()
+
+    assert body["report"] == "Final research report"
+    assert "report_error" not in body
+
+
+def test_unexpected_report_error_is_not_swallowed(client, pipeline):
+    pipeline["report_error"] = AttributeError("report module is broken")
 
     with pytest.raises(AttributeError):
         client.post("/research", json={"question": QUESTION})

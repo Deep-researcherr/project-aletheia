@@ -1,6 +1,7 @@
 import json
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from google.genai.errors import APIError
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
@@ -14,9 +15,19 @@ from backend.tools import github, news, serpapi
 
 SEARCH_ERRORS = (serpapi.SerpApiError, github.GitHubError, news.SerpApiError)
 RESEARCH_ERRORS = (APIError,)
+REPORT_ERRORS = (APIError,)
 
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:5500"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type", "Authorization"],
+)
+
 app.mount(
     "/frontend",
     StaticFiles(directory="frontend"),
@@ -84,14 +95,22 @@ def research(request: ResearchRequest):
 
     successful = [item for item in findings if item["finding"] is not None]
 
-    final_report = synthesize_report(
-        request.question,
-        successful,
-    )
-
-    return {
+    response = {
         "question": request.question,
         "plan": plan,
-        "report": final_report,
+        "report": None,
         "findings": findings,
     }
+
+    try:
+        response["report"] = synthesize_report(
+            request.question,
+            successful,
+        )
+    except REPORT_ERRORS as exc:
+        response["report_error"] = (
+            "Research report synthesis failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    return response
