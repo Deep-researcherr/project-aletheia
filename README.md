@@ -147,7 +147,7 @@ Then open:
 http://127.0.0.1:8000
 ```
 
-The frontend is served by the same process. To develop the frontend separately, run it on port 5500, which is already allowed by the CORS configuration:
+The frontend is served by the same process. To develop the frontend separately, run it on port 5500. The CORS configuration accepts localhost and 127.0.0.1 origins on any port:
 
 ```bash
 python3 -m http.server 5500 --directory frontend

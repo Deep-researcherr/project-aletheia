@@ -144,3 +144,32 @@ def test_missing_q_returns_422(client, monkeypatch):
     install_fake(monkeypatch, [{"type": "report", "data": "x", "sources": []}])
 
     assert client.get("/api/research").status_code == 422
+
+
+def test_localhost_post_preflight_is_allowed(client):
+    response = client.options(
+        "/research",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type, authorization",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert "POST" in response.headers["access-control-allow-methods"]
+    assert "content-type" in response.headers["access-control-allow-headers"]
+    assert "authorization" in response.headers["access-control-allow-headers"]
+
+
+def test_non_local_origin_preflight_is_rejected(client):
+    response = client.options(
+        "/research",
+        headers={
+            "Origin": "https://example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 400
