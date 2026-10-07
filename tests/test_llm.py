@@ -644,6 +644,27 @@ def test_all_garbage_json_raises_chain_error():
             llm.ask("sys", "user", json_mode=True)
 
 
+def test_think_blocks_are_stripped_before_parsing():
+    def fake_completion(**kwargs):
+        return FakeResponse("<think>planning the answer…</think>\n"
+                            '{"ok": true}')
+
+    _chain("gemini/gemini-3.6-flash")
+
+    with completing(fake_completion):
+        assert llm.ask("sys", "user", json_mode=True) == {"ok": True}
+
+
+def test_think_blocks_are_stripped_from_prose():
+    def fake_completion(**kwargs):
+        return FakeResponse("<THINK>draft</THINK>final answer")
+
+    _chain("gemini/gemini-3.6-flash")
+
+    with completing(fake_completion):
+        assert llm.ask("sys", "user") == "final answer"
+
+
 # --- chain-level retry after temporary rate limits ---------------------------
 #
 # When every model in the chain failed only with temporary quotas, one bounded

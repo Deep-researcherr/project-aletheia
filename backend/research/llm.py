@@ -663,6 +663,22 @@ def _loads_json(text: str):
     raise last
 
 
+def _clean_model_output(text: str | None) -> str:
+    """Strip reasoning blocks some models prepend to their reply.
+
+    Thinking/reasoning models (Qwen, gpt-oss family) wrap chain-of-thought
+    in <think> tags. Left in place it pollutes reports and breaks JSON
+    parsing; it is never part of the answer. Non-string input passes
+    through untouched.
+    """
+    if not isinstance(text, str):
+        return text
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1]
+    return re.sub(r"<think>.*?</think>", "", text,
+                  flags=re.DOTALL | re.IGNORECASE).strip()
+
+
 def _approx_tokens(system: str, user: str) -> int:
     """Cheap prompt-size estimate, used only to compare against learned limits."""
     return int((len(system) + len(user)) / CHARS_PER_TOKEN)
@@ -740,7 +756,7 @@ def ask(system: str, user: str, json_mode: bool = False, role: str = "default",
                         num_retries=0,  # retries are handled here, not by litellm
                         **kw,
                     )
-                out = r.choices[0].message.content
+                out = _clean_model_output(r.choices[0].message.content)
                 _clear_cooldown(model)
                 if not json_mode:
                     return out
