@@ -641,6 +641,18 @@ def _advance_notice(model: str, index: int, total: int,
     return f"{model} -> {reason} -> no fallback models left in the chain"
 
 
+def _clean_model_output(text: str) -> str:
+    """Remove reasoning blocks emitted by models such as Qwen."""
+    if not isinstance(text, str):
+        return text
+
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1]
+
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+    return text.strip()
+
 def ask(system: str, user: str, json_mode: bool = False, role: str = "default"):
     if _mock_enabled():
         return _mock(_mock_kind(system, role), user, json_mode)
@@ -671,7 +683,7 @@ def ask(system: str, user: str, json_mode: bool = False, role: str = "default"):
                         num_retries=0,  # retries are handled here, not by litellm
                         **kw,
                     )
-                out = r.choices[0].message.content
+                out = _clean_model_output(r.choices[0].message.content)
                 _clear_cooldown(model)
                 return json.loads(out) if json_mode else out
 
