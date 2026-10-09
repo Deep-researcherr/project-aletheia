@@ -645,6 +645,28 @@ def _unprocessed_chunks(state, chunks: list) -> tuple[list, list[dict]]:
     return fresh, upgraded
 
 
+def _attribute_round(notes: list[str], round_number: int) -> list[str]:
+    """Name the round an evidence-integrity failure happened in.
+
+    Without this the note read "6 of 7 passage batches" on a run where round 1
+    had already extracted 83 records from 40 batches. That is technically true
+    of the round it came from and badly misleading about the report as a whole:
+    a reader concludes the document is thin when it is not. Naming the round
+    keeps the warning without overstating it.
+    """
+    from .extract import INTEGRITY_PREFIX
+
+    out = []
+    for note in notes or []:
+        text = str(note)
+        if text.startswith(INTEGRITY_PREFIX):
+            out.append(f"{INTEGRITY_PREFIX}in round {round_number}, "
+                       f"{text[len(INTEGRITY_PREFIX):]}")
+        else:
+            out.append(text)
+    return out
+
+
 async def analyse(state):
     """Rank passages deterministically, then extract evidence in batched LLM calls.
 
@@ -721,7 +743,7 @@ async def analyse(state):
               note=f"extracting evidence from {len(scored)} passages")
     records, extraction_notes = await asyncio.to_thread(
         extract_evidence, scored, question, state.get("plan"), budget)
-    notes.extend(extraction_notes)
+    notes.extend(_attribute_round(extraction_notes, state.get("round") or 1))
     _progress("analyse", done=len(scored), total=len(scored),
               note=f"{len(records)} verified record(s) extracted")
 

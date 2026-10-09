@@ -143,7 +143,7 @@ async def deep_research(question: str, max_rounds: int = 3):
                                       "heading": heading,
                                       "data": markdown,
                                       "html": section_html})
-                yield emit({
+                report_event = emit({
                     "type": "report",
                     "data": upd["report"],
                     "html": upd.get("report_html") or "",
@@ -153,9 +153,41 @@ async def deep_research(question: str, max_rounds: int = 3):
                     "export": export,
                     "status": completion,
                 })
+                # Total wall clock for the run. Read after emit(), because
+                # emit() is what marks the bundle complete and stamps the
+                # duration; asking before that always returned None.
+                report_event["elapsed_s"] = _elapsed_for(question)
+                yield report_event
 
 
 def _export_meta(question: str) -> dict:
     """Where the markdown export was written, so the UI can offer a download."""
     from .export import last_export
     return last_export(question)
+
+
+def _elapsed_for(question: str):
+    """Wall clock for this run, read back from the recorded bundle."""
+    try:
+        from .runlog import get
+        bundle = get(question) or {}
+        return bundle.get("elapsed_s")
+    except Exception:
+        return None
+
+
+def format_duration(seconds) -> str:
+    """Human duration for the report cover: 4m 12s, 1h 03m 09s."""
+    try:
+        total = int(float(seconds))
+    except (TypeError, ValueError):
+        return "unknown"
+    if total < 0:
+        return "unknown"
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m {secs:02d}s"

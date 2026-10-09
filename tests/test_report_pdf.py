@@ -114,6 +114,58 @@ def test_fix_cites_skips_numbers_without_references():
     assert ">9<" in out
 
 
+def _text_of(pdf: bytes) -> str:
+    from pypdf import PdfReader
+    import io
+    return "\n".join(p.extract_text() or ""
+                      for p in PdfReader(io.BytesIO(pdf)).pages)
+
+
+def test_duration_is_printed_on_the_cover():
+    """A reader cannot tell a two-minute lookup from a twenty-minute run
+    without it, which is much of what makes the artefact believable."""
+    from backend.research.pdf_report import _duration
+
+    assert _duration(9) == "9s"
+    assert _duration(252) == "4m 12s"
+    assert _duration(3661) == "1h 01m 01s"
+    assert _duration(None) == "unknown"
+    assert _duration("nonsense") == "unknown"
+
+    pdf = _bundle()
+    pdf["elapsed_s"] = 423
+    text = _text_of(pdf_report.build_pdf(pdf, "2 rounds", ""))
+    assert "7m 03s" in text
+    assert "run duration" in text
+
+
+def test_run_label_omits_an_absent_throttle_mode():
+    """throttle_label is empty when the caller did not pin one, which used to
+    render "(2 rounds, )"."""
+    text = _text_of(pdf_report.build_pdf(_bundle(), "2 rounds", ""))
+    assert "(2 rounds)" in text
+    assert ", )" not in text
+
+
+def test_partial_reason_gets_a_readable_band_not_a_cramped_tile():
+    """The full headline was being wrapped two words per line inside a 130pt
+    stat tile."""
+    bundle = _bundle()
+    bundle["status"] = {
+        "status": "partial",
+        "headline": ("PARTIAL REPORT — evidence extraction returned nothing "
+                     "usable for 6 of 7 passage batches"),
+        "missing_sections": ["Evidence integrity: in round 2, extraction "
+                             "returned nothing usable"],
+    }
+    text = _text_of(pdf_report.build_pdf(bundle, "2 rounds", ""))
+    assert "Why:" in text
+    assert "PARTIAL" in text
+    # The trailing "Missing from this report" line was a fourth copy of the
+    # same sentence; the cover band and the body banner already say it.
+    assert "Missing from this report" not in text
+
+
 def test_build_ref_notes_is_deterministic():
     refs = {"1": {"title": "Alpha", "url": "https://a.dev/1",
                   "cited": ["Abstract"]}}

@@ -27,6 +27,21 @@ def _configure_logging() -> None:
     # uvicorn installs its own handlers; leave its format alone.
     _logging.getLogger("uvicorn.access").setLevel(_logging.WARNING)
 
+    # litellm narrates every call twice (its own handler plus the root one) at
+    # INFO: "completion() model=...", "Wrapper: Completed Call", plus bare
+    # "Provider List:" banners. That buried the pipeline's own progress lines
+    # under thousands of lines of noise, and a 429 storm scrolled past
+    # unread. The lines that matter are already logged by this package's own
+    # logger at WARNING ("rate limited: 429 ...", "cooling down", "trying
+    # fallback"), so litellm is held at ERROR and only its genuine crashes
+    # surface.
+    for name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
+        _logging.getLogger(name).setLevel(_logging.ERROR)
+    _logging.getLogger("litellm").setLevel(_logging.ERROR)
+    # Belt and braces: litellm attaches its own handler in some versions, which
+    # is what produced the duplicated lines in the first place.
+    _logging.getLogger("LiteLLM").handlers.clear()
+
 
 _configure_logging()
 

@@ -9,6 +9,7 @@ anything. Bounded to the most recent runs; never raises.
 from __future__ import annotations
 
 import threading
+import time
 from collections import OrderedDict
 
 _KEEP_RUNS = 8
@@ -28,6 +29,11 @@ def begin(question: str, max_rounds: int) -> None:
         _runs[_key(question)] = {
             "question": question,
             "max_rounds": max_rounds,
+            # Wall clock at run start. The PDF prints the total, and the
+            # frontend's elapsed/remaining timer is anchored to it rather than
+            # to whenever the page happened to load.
+            "started_at": time.time(),
+            "elapsed_s": None,
             "plan": {},
             "searches": [],
             "evidence_count": 0,
@@ -105,6 +111,11 @@ def record(question: str, event: dict) -> None:
                 bundle["stats"] = event.get("stats") or {}
                 bundle["export"] = event.get("export") or {}
                 bundle["status"] = event.get("status") or bundle["status"]
+                # Stamped when the report lands, so the figure printed on the
+                # cover is the time the run actually took, not the time the
+                # PDF happened to be requested.
+                started = bundle.get("started_at")
+                bundle["elapsed_s"] = (time.time() - started) if started else None
                 bundle["complete"] = True
             _runs.move_to_end(key)
     except Exception:

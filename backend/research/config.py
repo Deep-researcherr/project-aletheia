@@ -370,10 +370,17 @@ def throttle_llm_per_minute() -> float:
     """Ceiling on model calls per minute. 0 disables pacing.
 
     Each call waits for its own slot, so this sets the floor on how long a
-    stage of N calls takes: N * 60/per_minute seconds. At the old default of 12
-    a 40-batch extraction stage spent 200s asleep before doing any work.
+    stage of N calls takes: N * 60/per_minute seconds.
+
+    14, not higher: the lead model (Gemini free tier) enforces its own
+    per-minute quota below this, and running above it does not go faster -- it
+    converts calls into 429s, which burn a fallback attempt each and push the
+    work onto weaker models. Measured at 30/min: three separate 429 storms in
+    one run, with extraction quality visibly worse on the fallback model.
+    Raise this only with a provider that has the headroom, and watch the log
+    for "rate limited: 429 per-minute quota".
     """
-    return _float("THROTTLE_LLM_PER_MINUTE", 30.0, 0.0, 10_000.0)
+    return _float("THROTTLE_LLM_PER_MINUTE", 14.0, 0.0, 10_000.0)
 
 
 def throttle_llm_max_concurrent() -> int:

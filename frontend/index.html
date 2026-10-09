@@ -104,7 +104,25 @@
 
             <div class="card progress-card" id="progress-card">
 
-                <h4>Research progress</h4>
+                <div class="progress-head">
+                    <h4>Research progress</h4>
+                    <div class="run-timer" id="run-timer" hidden
+                         role="timer" aria-live="off">
+                        <div class="run-timer-block">
+                            <span class="run-timer-value" id="run-timer-elapsed">0s</span>
+                            <span class="run-timer-label">elapsed</span>
+                        </div>
+                        <div class="run-timer-sep" aria-hidden="true"></div>
+                        <div class="run-timer-block">
+                            <span class="run-timer-value"
+                                  id="run-timer-remaining">estimating…</span>
+                            <span class="run-timer-label">remaining</span>
+                        </div>
+                        <div class="run-timer-bar" aria-hidden="true">
+                            <div class="run-timer-bar-fill" id="run-timer-fill"></div>
+                        </div>
+                    </div>
+                </div>
 
                 <ol class="progress-list" id="progress-list">
                     <li class="progress-step" data-step="plan">

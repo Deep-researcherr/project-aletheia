@@ -105,6 +105,211 @@ let progressSearchResults = 0;
 let progressSections = 0;
 
 
+// --- run timer -------------------------------------------------------------
+//
+// Elapsed is exact. Remaining is an estimate, and it is built from what this
+// run has actually done rather than from a fixed guess: each stage's first
+// event starts its clock, and when a stage finishes its measured duration
+// replaces the prior for any later round. A prior with nothing behind it is a
+// guess, so the label says "estimating…" until the first stage completes.
+
+const TIMER_STAGES = ["plan", "search", "retrieve", "analyse", "write"];
+
+// Seconds, taken from the stage boundaries of a real logged run (plan 43s,
+// search 136s, retrieve 59s, analyse 235s across two rounds, write 93s), so a
+// cold start lands within ~10% before anything has been measured here. Each
+// stage's own measurement replaces its prior as soon as it finishes.
+const TIMER_PRIORS = {
+    plan: 45, search: 130, retrieve: 95, analyse: 210, write: 140,
+};
+const TIMER_EXPECTED_SECTIONS = 18;
+
+let timerState = null;
+let timerHandle = null;
+
+const runTimer = document.getElementById("run-timer");
+const runTimerElapsed = document.getElementById("run-timer-elapsed");
+const runTimerRemaining = document.getElementById("run-timer-remaining");
+const runTimerFill = document.getElementById("run-timer-fill");
+
+
+function timerReset() {
+    timerState = {
+        startedAt: Date.now(),
+        active: null,
+        activeSince: null,
+        measured: {},
+        completed: {},
+        fraction: {},
+        rounds: 1,
+        extraRounds: 0,
+        finished: false,
+    };
+    if (timerHandle) {
+        clearInterval(timerHandle);
+    }
+    timerHandle = setInterval(timerTick, 1000);
+    timerTick();
+}
+
+
+function timerFormat(seconds) {
+    const total = Math.max(0, Math.round(seconds));
+    if (total < 60) {
+        return `${total}s`;
+    }
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    if (mins < 60) {
+        return `${mins}m ${String(secs).padStart(2, "0")}s`;
+    }
+    return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, "0")}m`;
+}
+
+
+/** Mark a stage as the active one, timing the transition. */
+function timerStage(name) {
+    if (!timerState || timerState.finished) {
+        return;
+    }
+    if (timerState.active === name) {
+        return;
+    }
+    timerFinishStage();
+    timerState.active = name;
+    timerState.activeSince = Date.now();
+}
+
+
+function timerFinishStage() {
+    // `activeSince == null` rather than a falsy check: it is a timestamp, and 0
+    // is a legitimate one. A falsy guard silently refuses to close a stage that
+    // began at the epoch, which leaves its prior in the estimate forever.
+    if (!timerState || !timerState.active || timerState.activeSince == null) {
+        return;
+    }
+    const spent = (Date.now() - timerState.activeSince) / 1000;
+    const name = timerState.active;
+    // Longest observed wins: a stage interrupted by a round gap should not
+    // overwrite a longer, cleaner measurement with a short one.
+    if (spent > (timerState.measured[name] || 0)) {
+        timerState.measured[name] = spent;
+    }
+    timerState.completed[name] = true;
+    timerState.active = null;
+    timerState.activeSince = null;
+}
+
+
+/** How far through the active stage we are, 0..1. */
+function timerFraction(name) {
+    const f = timerState && timerState.fraction[name];
+    if (typeof f === "number") {
+        return Math.max(0, Math.min(1, f));
+    }
+    return 0;
+}
+
+
+function timerRemainingSeconds() {
+    if (!timerState) {
+        return null;
+    }
+    const extraRounds = timerState.extraRounds;
+    let remaining = 0;
+    for (const stage of TIMER_STAGES) {
+        if (timerState.completed[stage]) {
+            continue;
+        }
+        const prior = timerState.measured[stage] || TIMER_PRIORS[stage];
+        // retrieve and analyse run once per round; extra gap rounds repeat them.
+        const repeats = (stage === "retrieve" || stage === "analyse")
+            ? 1 + extraRounds : 1;
+        if (timerState.active === stage) {
+            remaining += prior * (1 - timerFraction(stage)) * repeats;
+        } else {
+            remaining += prior * repeats;
+        }
+    }
+    return Math.max(0, remaining);
+}
+
+
+function timerTotalSeconds() {
+    if (!timerState) {
+        return null;
+    }
+    const elapsed = (Date.now() - timerState.startedAt) / 1000;
+    const remaining = timerRemainingSeconds();
+    return remaining === null ? null : elapsed + remaining;
+}
+
+
+function timerTick() {
+    if (!timerState || !runTimer) {
+        return;
+    }
+    runTimer.hidden = false;
+
+    const elapsed = (Date.now() - timerState.startedAt) / 1000;
+    if (runTimerElapsed) {
+        runTimerElapsed.textContent = timerFormat(elapsed);
+    }
+
+    // Only claim an estimate once something has actually been timed; before
+    // that the priors are guesses and should read as guesses.
+    const timed = Object.keys(timerState.measured).length > 0
+        || timerState.completed.plan;
+    if (timerState.finished) {
+        if (runTimerRemaining) {
+            runTimerRemaining.textContent = "done";
+        }
+    } else if (timed) {
+        const remaining = timerRemainingSeconds();
+        if (runTimerRemaining) {
+            runTimerRemaining.textContent = `~${timerFormat(remaining)}`;
+        }
+        const total = elapsed + remaining;
+        if (runTimerFill && total > 0) {
+            runTimerFill.style.width =
+                `${Math.min(100, Math.max(0, (elapsed / total) * 100))}%`;
+        }
+    } else if (runTimerRemaining) {
+        runTimerRemaining.textContent = "estimating…";
+    }
+}
+
+
+function timerFinish(totalSeconds) {
+    if (!timerState) {
+        return;
+    }
+    timerFinishStage();
+    timerState.finished = true;
+    if (timerHandle) {
+        clearInterval(timerHandle);
+        timerHandle = null;
+    }
+    if (!runTimer) {
+        return;
+    }
+    runTimer.classList.add("is-done");
+    if (runTimerElapsed) {
+        // Prefer the server's own measurement: it covers the whole run,
+        // whereas the browser timer starts when the page did.
+        runTimerElapsed.textContent = timerFormat(
+            typeof totalSeconds === "number" && totalSeconds > 0
+                ? totalSeconds : (Date.now() - timerState.startedAt) / 1000);
+    }
+    if (runTimerRemaining) {
+        runTimerRemaining.textContent = "done";
+    }
+    if (runTimerFill) {
+        runTimerFill.style.width = "100%";
+    }
+}
+
+
 function selectTab(name, focusTab) {
     for (const tab of tabButtons) {
         const active = tab.dataset.tab === name;
@@ -161,6 +366,20 @@ function resetProgress() {
     progressSearchSeen = new Set();
     progressSearchResults = 0;
     progressSections = 0;
+    // A new run must not inherit the previous one's timings or its finished
+    // styling, or the timer opens already reading "done".
+    if (timerHandle) {
+        clearInterval(timerHandle);
+        timerHandle = null;
+    }
+    timerState = null;
+    if (runTimer) {
+        runTimer.hidden = true;
+        runTimer.classList.remove("is-done", "is-stalled");
+        if (runTimerFill) {
+            runTimerFill.style.width = "0%";
+        }
+    }
     for (const step of Object.keys(progressSteps)) {
         setStepState(step, "todo");
     }
@@ -310,13 +529,26 @@ function progressGap(gap) {
     if (row) {
         row.classList.remove("hidden");
     }
-    setStepState("gap", "active");
-    if (progGapDetail) {
-        progGapDetail.textContent = hasFollowUps
-            ? `Chasing ${gap.follow_ups.length} follow-up${gap.follow_ups.length === 1 ? "" : "s"}: ${gap.missing || ""}`
-            : (gap.missing || "Checking coverage…");
-    }
     setStepState("read", "done");
+    if (!hasFollowUps) {
+        // A gap with nothing to chase is still being assessed.
+        setStepState("gap", "active");
+        if (progGapDetail) {
+            progGapDetail.textContent = gap.missing || "Checking coverage…";
+        }
+        return;
+    }
+    // Once the follow-ups are dispatched this step has finished its job. It
+    // used to stay "active" for the whole of the next round -- several minutes
+    // of spinner with nothing behind it, and then never ticked even after the
+    // report landed. The chasing is now shown by the search step going active
+    // again, which is what is actually happening.
+    setStepState("gap", "done");
+    if (progGapDetail) {
+        progGapDetail.textContent =
+            `Chased ${gap.follow_ups.length} follow-up${gap.follow_ups.length === 1 ? "" : "s"}: ${gap.missing || ""}`;
+    }
+    setStepState("search", "active");
 }
 
 
@@ -687,11 +919,17 @@ function displayEvent(data, question) {
     resultQuestion.textContent = question;
 
     if (data.type === "plan") {
+        timerReset();
+        timerStage("plan");
         renderPlan(data.data);
         progressPlan(data.data);
     }
 
     if (data.type === "results") {
+        if (!timerState) {
+            timerReset();
+        }
+        timerStage("search");
         renderSearch(data);
         progressSearch(data);
     }
@@ -713,10 +951,31 @@ function displayEvent(data, question) {
     }
 
     if (data.type === "progress") {
+        if (!timerState) {
+            timerReset();
+        }
+        if (data.stage === "retrieve") {
+            timerStage("retrieve");
+            if (data.total) {
+                timerState.fraction.retrieve = (data.done || 0) / data.total;
+            }
+        }
+        if (data.stage === "analyse") {
+            timerStage("analyse");
+            if (data.total) {
+                timerState.fraction.analyse = (data.done || 0) / data.total;
+            }
+        }
         progressLive(data);
     }
 
     if (data.type === "gap") {
+        if ((data.data.follow_ups || []).length && timerState) {
+            // Another round means retrieve and analyse will run again, so the
+            // estimate has to carry a second pass or it collapses to zero while
+            // the pipeline is plainly still working.
+            timerState.extraRounds = Math.min(3, (timerState.extraRounds || 0) + 1);
+        }
         renderGap(data.data);
         progressGap(data.data);
     }
@@ -734,6 +993,13 @@ function displayEvent(data, question) {
     }
 
     if (data.type === "report_section") {
+        timerStage("write");
+        if (timerState) {
+            // progressWrite() owns the counter; read it after the call below
+            // would be too late, so derive the fraction from its own total.
+            timerState.fraction.write = Math.min(
+                1, (progressSections + 1) / TIMER_EXPECTED_SECTIONS);
+        }
         renderReportSection(data);
         progressWrite();
     }
@@ -742,8 +1008,17 @@ function displayEvent(data, question) {
         if (data.status) {
             renderStatus(data.status);
         }
+        // The server stamps the true run duration when the report lands; fall
+        // back to the browser's own count if it is somehow absent.
+        timerFinish(data.elapsed_s);
         renderReport(data);
         progressDone();
+    }
+
+    if (data.type === "done") {
+        // Covers a run that ended without a report body: stop the clock rather
+        // than leaving it counting forever.
+        timerFinish();
     }
 
     results.scrollIntoView({

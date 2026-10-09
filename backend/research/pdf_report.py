@@ -34,6 +34,9 @@ CARD_BORDER = colors.HexColor("#D9E2EC")
 MUTED = colors.HexColor("#5B6B7F")
 REF_BG = colors.HexColor("#EEF4FF")
 REF_LINE = colors.HexColor("#B9CCF0")
+# Used only for the "this run was incomplete" band on the cover.
+AMBER_BG = colors.HexColor("#FFF7ED")
+AMBER_LINE = colors.HexColor("#E8A33D")
 INK = colors.HexColor("#232A35")
 
 # ------------------------------------------------------------ text transforms
@@ -250,6 +253,23 @@ def make_header_footer(band_title, band_sub, footer_tag):
         canvas.line(54, 36, A4[0] - 54, 36)
         canvas.restoreState()
     return fn
+
+
+def _duration(seconds) -> str:
+    """Human duration for the cover: 4m 12s, 1h 03m 09s."""
+    try:
+        total = int(float(seconds))
+    except (TypeError, ValueError):
+        return "unknown"
+    if total < 0:
+        return "unknown"
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m {secs:02d}s"
 
 
 def stat_tile(S, value, label):
@@ -612,16 +632,40 @@ def build_pdf(bundle: dict, rounds_label: str = "",
         gap_verdict, gap_note = "checked", gap.get("missing", "")
 
     headline = status.get("headline") or status.get("status", "REPORT").upper()
+    # A stat tile is for a number or a single word. The full headline -- a
+    # PARTIAL verdict plus a sentence explaining the degraded evidence base --
+    # was being crammed into a 130pt column and wrapped every two or three
+    # words. Keep the verdict in the tile and give the reason its own full-width
+    # band underneath, where it can be read.
+    state = (status.get("status") or "completed").upper()
+    short_verdict = {"COMPLETED": "COMPLETE", "PARTIAL": "PARTIAL",
+                     "FAILED": "FAILED"}.get(state, state)
+    reason = ""
+    if "—" in headline:
+        reason = headline.split("—", 1)[1].strip()
+    missing_sections = [str(m) for m in (status.get("missing_sections") or [])]
 
     S = styles()
     story = []
 
     # ---- cover ---------------------------------------------------------
     story.append(P(question.strip().rstrip("?") or "Research Report", S, "title"))
+    subtitle_bits = [
+        f"{distinct_sources} distinct sources",
+        f"{records} traceable findings",
+        f"{report_words:,} words",
+        f"{cites} citations",
+    ]
+    # How long the run actually took, stamped when the report landed. Without
+    # it a reader has no idea whether this was a two-minute lookup or a
+    # twenty-minute investigation, which is much of what makes the artefact
+    # believable.
+    elapsed = bundle.get("elapsed_s")
+    if elapsed:
+        subtitle_bits.insert(0, f"generated in {_duration(elapsed)}")
     story.append(P(
         f"Research synthesis generated {today} &nbsp;\u2022&nbsp; "
-        f"{distinct_sources} distinct sources, {records} traceable findings "
-        f"&nbsp;\u2022&nbsp; {report_words:,} words, {cites} citations",
+        + " &nbsp;\u2022&nbsp; ".join(subtitle_bits),
         S, "subtitle"))
     story.append(HRFlowable(width="100%", thickness=1.2, color=TEAL,
                             spaceAfter=8, spaceBefore=2))
@@ -636,9 +680,13 @@ def build_pdf(bundle: dict, rounds_label: str = "",
          stat_tile(S, f"{retrieval.get('retrieved', 0)} / {retrieval.get('attempted', 0)}",
                    f"docs read ({retrieval.get('full_text', 0)} full)")],
         [stat_tile(S, gap_verdict, f"gap check{', ' + gap_note if gap_note else ''}"[:60]),
-         stat_tile(S, headline, "all sections generated"
-                   if status.get("status") == "completed" else "see missing list"),
+         stat_tile(S, short_verdict,
+                   "all sections generated" if state == "COMPLETED"
+                   else "report is incomplete — see below"),
          stat_tile(S, str(cites), "citations in report")],
+        [stat_tile(S, _duration(elapsed) if elapsed else "—", "run duration"),
+         stat_tile(S, str(len(gaps)) or "—", "gap checks run"),
+         stat_tile(S, rounds_label or "—", "rounds requested")],
     ], colWidths=[130, 130, 130], spaceBefore=4, spaceAfter=4)
     tiles.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
                                ("LEFTPADDING", (0, 0), (-1, -1), 4),
@@ -646,13 +694,45 @@ def build_pdf(bundle: dict, rounds_label: str = "",
     story.append(tiles)
     story.append(Spacer(1, 2))
 
+    # The reason a run came out partial, given room to be read. Without this
+    # band the only trace of a degraded evidence base was a column of text
+    # wrapping two words per line inside a stat tile.
+    if state != "COMPLETED":
+        band_rows = []
+        if reason:
+            band_rows.append(P(f"<b>Why:</b> {esc(reason)}", S, "body"))
+        if missing_sections:
+            # An integrity failure is both the "why" and a missing entry, so
+            # listing it twice reads as two separate problems. Show only what
+            # the reason does not already cover.
+            extra = [m for m in missing_sections
+                     if not (reason and reason[:40] in m)]
+            if extra:
+                shown = extra[:6]
+                listed = "<br/>".join(f"• {esc(m)}" for m in shown)
+                if len(extra) > len(shown):
+                    listed += f"<br/>• …and {len(extra) - len(shown)} more"
+                band_rows.append(P(f"<b>Outstanding:</b><br/>{listed}", S, "body"))
+        band = Table([[cell] for cell in band_rows], colWidths=[400])
+        band.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), AMBER_BG),
+            ("BOX", (0, 0), (-1, -1), 0.7, AMBER_LINE),
+            ("INNERPADDING", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        story.append(band)
+        story.append(Spacer(1, 6))
+
     used_sources = sorted({(s.get("source") or "") for s in searches if s.get("source")})
     search_line = (f"{query_count} queries across {', '.join(used_sources) or 'no sources'}"
                    + (f"; {len(errors)} failed ({errors[0].get('error', '')[:80]})"
                       if errors else ""))
+    # Join only the parts that exist: throttle_label is empty when the caller
+    # did not pin a throttle mode, which used to render "(2 rounds, )".
+    run_label = ", ".join(p for p in (rounds_label, throttle_label) if p)
     story.append(overview_table(S, [
         ("Question", f"{question.strip()}"
-         + (f" ({rounds_label}, {throttle_label})" if rounds_label else "")),
+         + (f" ({run_label})" if run_label else "")),
         ("Search", search_line),
         ("Retrieval", f"{retrieval.get('retrieved', 0)} full-text reads, "
                       f"{retrieval.get('partial', 0)} partial, "
@@ -832,9 +912,10 @@ def build_pdf(bundle: dict, rounds_label: str = "",
     notes = analysis.get("notes") or []
     if notes:
         story.append(P("Pipeline notes: " + "; ".join(str(x) for x in notes), S, "small"))
-    missing = (status.get("missing_sections") or [])
-    if missing:
-        story.append(P("Missing from this report: " + "; ".join(missing), S, "small"))
+    # Missing sections are not repeated at the end of the document: the cover
+    # carries them in a readable "Why / Outstanding" band, and the report body
+    # carries the partial banner and its own "How this run went" section. A
+    # fourth copy of the same sentence added nothing except length.
 
     slug = _slugify(question)
     today_str = datetime.date.today().isoformat()
