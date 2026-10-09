@@ -104,18 +104,84 @@ def _progress(stage: str, **fields) -> None:
     finished, so the browser showed a frozen step for the whole of it. The
     writer is absent when a node is called directly (tests, or a graph run with
     no custom stream), so this stays silent rather than raising.
+
+    Only usable from inside the node's own context -- see :func:`_progress_queue`.
+    """
+    writer = _stream_writer()
+    if writer is None:
+        return
+    _write_progress(writer, stage, **fields)
+
+
+def _stream_writer():
+    """Resolve the stream writer, or None when no stream is attached.
+
+    Must be called from inside the node. LangGraph resolves the writer through
+    a contextvar, and the writer it hands back is itself a closure that reads
+    that same contextvar on every call. So neither looking it up nor holding on
+    to it helps once you cross a thread boundary: from a fetch worker both raise
+    "Called get_config outside of a runnable context", and _write_progress
+    swallows that, so the events vanish silently. That looks exactly like a
+    feature working in tests and doing nothing in a real run.
     """
     try:
         from langgraph.config import get_stream_writer
-        writer = get_stream_writer()
+        return get_stream_writer()
     except Exception:
-        return
+        return None
+
+
+def _write_progress(writer, stage: str, **fields) -> None:
     if writer is None:
         return
     try:
         writer({"type": "progress", "stage": stage, **fields})
     except Exception:               # progress must never break a stage
         log.debug("progress write failed for stage %s", stage, exc_info=True)
+
+
+class _ProgressQueue:
+    """Collects progress from worker threads and emits it from the node.
+
+    A fetcher runs in a thread pool, and LangGraph's stream writer only works
+    inside the node's own context (see :func:`_stream_writer`). So worker
+    threads append to a queue here, and the node drains it into the real writer
+    as the batch progresses -- which is also where the events get batched, so a
+    hundred documents do not become a hundred separate stream frames.
+
+    Draining happens from the node's context: ``asyncio.to_thread`` returns
+    control to the event loop before the next drain, so the writer is valid
+    again by then.
+    """
+
+    def __init__(self, stage: str, writer):
+        self.stage = stage
+        self.writer = writer
+        self.done = 0
+        self.total = 0
+        self._pending: list[dict] = []
+
+    def emit(self, note: str = "", **fields) -> None:
+        """Safe to call from any thread, including a fetch worker."""
+        self._pending.append({"note": note, **fields})
+
+    def announce(self, total: int, note: str = "") -> None:
+        self.total = total
+        self.emit(note=note, done=0, total=total)
+
+    def drain(self, limit: int = 20) -> None:
+        """Emit up to `limit` queued events. Call from the node's context."""
+        if self.writer is None or not self._pending:
+            return
+        batch, self._pending = self._pending[:limit], self._pending[limit:]
+        for item in batch:
+            # The producer may have set an explicit counter; only advance the
+            # running total when it did not, so drain never double-counts.
+            if "done" in item:
+                self.done = int(item["done"])
+            else:
+                self.done += 1
+            _write_progress(self.writer, self.stage, **item)
 
 
 def _out_of_time(state) -> bool:
@@ -218,6 +284,23 @@ def collect(state):
     return {"evidence": _col(state).list()}
 
 
+async def _fetch_reporting(fetcher, todo: list, on_doc_done, progress) -> list:
+    """Fetch in a worker thread while draining progress from the node's context.
+
+    The fetch itself blocks a thread, so the node awaits it as a task and drains
+    the queue on an interval. Draining has to happen here, in the node's own
+    context, because LangGraph's stream writer only works there -- a worker
+    thread writing to it raises, and the raise would be swallowed.
+    """
+    task = asyncio.ensure_future(
+        asyncio.to_thread(fetcher.fetch_many, todo, on_doc_done))
+    while not task.done():
+        progress.drain()
+        await asyncio.sleep(0.4)
+    progress.drain(limit=10_000)          # flush whatever is left
+    return task.result()
+
+
 async def retrieve(state):
     """Download and chunk the real documents behind the search results.
 
@@ -305,15 +388,16 @@ async def retrieve(state):
         if wiki_docs:
             notes.append(f"wikipedia baseline: {len(wiki_docs)} article(s) pre-loaded")
 
-    _progress("retrieve", done=0, total=len(todo), note="downloading sources")
-    seen_docs = {"n": 0}
+    # Worker threads cannot write to the stream directly, so they queue here and
+    # the node drains the queue while the batch runs.
+    progress = _ProgressQueue("retrieve", _stream_writer())
+    progress.announce(len(todo), note="downloading sources")
 
     def on_doc_done(doc) -> None:
-        """Real per-document progress, from the fetch worker threads."""
-        seen_docs["n"] += 1
-        _progress("retrieve", done=seen_docs["n"], total=len(todo),
-                  url=doc.url, status=doc.status,
-                  note=f"read {doc.title or doc.url}")
+        """Called from the fetch worker threads as each document completes."""
+        progress.done += 1
+        progress.emit(done=progress.done, total=len(todo), url=doc.url,
+                      status=doc.status, note=f"read {doc.title or doc.url}")
 
     try:
         if not todo:
@@ -322,8 +406,8 @@ async def retrieve(state):
             # The progress callback is optional: a fetcher that predates it (or
             # a stub) must not turn a cosmetic feature into a failed stage.
             try:
-                fetched = await asyncio.to_thread(
-                    fetcher.fetch_many, todo, on_doc_done)
+                fetched = await _fetch_reporting(
+                    fetcher, todo, on_doc_done, progress)
             except TypeError:
                 log.debug("fetcher does not accept a progress callback")
                 fetched = await asyncio.to_thread(fetcher.fetch_many, todo)

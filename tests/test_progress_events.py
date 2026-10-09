@@ -58,11 +58,175 @@ def test_progress_reaches_an_attached_writer(monkeypatch):
                         "done": 3, "total": 9, "note": "read a doc"}]
 
 
+def test_stream_writer_is_unavailable_inside_a_worker_thread():
+    """Why the writer has to be captured before it crosses into a thread pool.
+
+    LangGraph resolves the stream writer through a contextvar, and contextvars
+    do not propagate into ThreadPoolExecutor workers: get_config() raises
+    "outside of a runnable context" there. Resolving the writer inside a fetch
+    callback therefore yields None and the per-document events silently never
+    fire -- the feature looks alive in unit tests and does nothing in a real
+    run. This pins the underlying behaviour so the capture above stays
+    necessary rather than looking redundant.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import langgraph.config as lc
+
+    # With no runnable context at all, the lookup is a safe no-op.
+    assert G._stream_writer() is None
+
+    # Simulate being inside a graph node: get_stream_writer() reads
+    # config[CONF][CONFIG_KEY_RUNTIME].stream_writer, so the stand-in has to be
+    # subscriptable exactly as the real config is.
+    runtime = type("R", (), {"stream_writer": staticmethod(lambda _e: None)})()
+    token = lc.var_child_runnable_config.set(
+        {lc.CONF: {lc.CONFIG_KEY_RUNTIME: runtime}})
+    try:
+        assert G._stream_writer() is not None, "resolvable in the node context"
+
+        def from_worker(_i):
+            try:
+                return G._stream_writer()
+            except Exception as exc:      # pragma: no cover - defensive
+                return exc
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            got = list(pool.map(from_worker, [0]))[0]
+        assert got is None, (
+            "contextvar unexpectedly propagated into the worker; if this now "
+            "holds, the writer capture in retrieve() can be simplified")
+    finally:
+        lc.var_child_runnable_config.reset(token)
+
+
+def test_retrieve_emits_one_event_per_document_from_worker_threads(monkeypatch):
+    """Per-document progress, emitted from real worker threads.
+
+    The fake fetcher dispatches to a thread pool, so this reproduces the
+    contextvar problem: the writer is resolved once in the node and handed to
+    the workers.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import langgraph.config as lc
+
+    delivered = []
+    # A real runnable context, so _stream_writer() resolves through the same
+    # contextvar path production uses rather than a stubbed global.
+    runtime = type("R", (), {"stream_writer": staticmethod(delivered.append)})()
+    token = lc.var_child_runnable_config.set(
+        {lc.CONF: {lc.CONFIG_KEY_RUNTIME: runtime}})
+    try:
+        run = _retrieve_against(_ThreadedFetcher(), 5)
+    finally:
+        lc.var_child_runnable_config.reset(token)
+
+    counts = [(e.get("done"), e.get("total")) for e in delivered]
+    assert counts[0] == (0, 5)
+    assert sorted(c[0] for c in counts[1:]) == [1, 2, 3, 4, 5], (
+        f"per-document events lost across the thread boundary: {counts}")
+
+
+class _ThreadedFetcher:
+    """Dispatches fetches to real worker threads, like the production fetcher."""
+
+    budget = 100
+    fetched = 0
+
+    def fetch_many(self, urls, on_done=None):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(url):
+            doc = FetchedDoc(url=url, final_url=url, status="full",
+                             method="html", title=f"Doc {url}",
+                             text="body text " * 40)
+            if on_done is not None:
+                on_done(doc)              # runs on a worker thread
+            return doc
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            return list(pool.map(one, urls))
+
+
+def _retrieve_against(fetcher, count):
+    state = {"question": "q", "max_rounds": 1, "round": 1,
+             "plan": {"subquestions": []}, "log": [], "notes": [],
+             "fetcher": fetcher,
+             "raw": [{"title": "T", "url": f"https://x.dev/{i}", "snippet": "s",
+                      "date": "2025", "type": "web", "query": "q"}
+                     for i in range(count)]}
+    return asyncio.run(G.retrieve(state))
+
+
+
+def test_progress_survives_a_real_compiled_graph_with_worker_threads():
+    """The full path: compiled graph, node context, real fetch threads.
+
+    Unit tests with a stubbed writer cannot catch this class of bug -- the
+    writer only works inside the node's context, and a stub does not care. Here
+    the node resolves the writer from LangGraph for real, the fetch runs on
+    genuine worker threads, and the events still have to arrive.
+    """
+    import operator
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+    from typing import Annotated, TypedDict
+
+    from langgraph.graph import START, StateGraph
+
+    class _S(TypedDict):
+        v: Annotated[list, operator.add]
+
+    class _Fetcher:
+        budget = 100
+        fetched = 0
+
+        def fetch_many(self, urls, on_done=None):
+            def one(url):
+                _time.sleep(0.02)
+                if on_done:
+                    on_done(f"doc-{url}")
+                return url
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                return list(pool.map(one, urls))
+
+    async def node(state):
+        writer = G._stream_writer()
+        todo = [f"u{i}" for i in range(8)]
+        progress = G._ProgressQueue("retrieve", writer)
+        progress.announce(len(todo), note="downloading sources")
+
+        def on_done(doc):
+            progress.done += 1
+            progress.emit(done=progress.done, total=len(todo),
+                          url=doc, note=f"read {doc}")
+
+        got = await G._fetch_reporting(_Fetcher(), todo, on_done, progress)
+        return {"v": [len(got)]}
+
+    builder = StateGraph(_S)
+    builder.add_node("n", node)
+    builder.add_edge(START, "n")
+    app = builder.compile()
+
+    async def drain():
+        events = []
+        async for mode, chunk in app.astream({"v": []},
+                                            stream_mode=["updates", "custom"]):
+            if mode == "custom":
+                events.append(chunk)
+        return events
+
+    events = asyncio.run(drain())
+    counts = [e.get("done") for e in events]
+    assert counts == list(range(9)), f"expected 0..8, got {counts}"
+    assert all(e["stage"] == "retrieve" for e in events)
+
+
 def test_retrieve_emits_one_event_per_document(monkeypatch):
     """Real per-document progress, not a single start and stop."""
     written = []
-    monkeypatch.setattr("langgraph.config.get_stream_writer",
-                        lambda: written.append)
+    monkeypatch.setattr(G, "_stream_writer", lambda: written.append)
 
     state = {"question": "q", "max_rounds": 1, "round": 1,
              "plan": {"subquestions": []}, "log": [], "notes": [],
