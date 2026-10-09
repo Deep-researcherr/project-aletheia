@@ -13,6 +13,10 @@ from .graph import graph
 from . import config
 from .runlog import begin as _begin_run, record as _record_event
 
+import logging
+
+log = logging.getLogger(__name__)
+
 
 def _section_html(markdown: str) -> str:
     from .markdown_html import render_markdown_html
@@ -23,6 +27,18 @@ async def deep_research(question: str, max_rounds: int = 3):
     evidence = []
     stats: dict = {}
     _begin_run(question, max_rounds)
+
+    # Say what the run depends on, and what is left of each budget, before it
+    # spends anything. Announced once per run rather than per stage, so the log
+    # stays readable, and never allowed to raise: a status line must not be able
+    # to take down a research run.
+    services = []
+    try:
+        from . import services as services_module
+        services = await services_module.announce(question)
+    except Exception as exc:
+        log.debug("service announcement unavailable: %s", exc)
+
     init = {
         "question": question,
         "max_rounds": max_rounds,
@@ -37,6 +53,10 @@ async def deep_research(question: str, max_rounds: int = 3):
         """Record for the PDF export, then stream to the browser."""
         _record_event(question, event)
         return event
+
+    if services:
+        yield emit({"type": "services",
+                    "data": [row.as_dict() for row in services]})
 
     # "custom" carries progress events written from inside a stage via
     # get_stream_writer(). retrieve and analyse are the two longest stages and

@@ -10,6 +10,16 @@ import os
 # is how a batch silently gets truncated by the provider.
 CHARS_PER_TOKEN = 3.5
 
+# Verified reachable on 2026-10-04. Any litellm model string works, but it must
+# carry a provider prefix and the matching provider key must be present. The
+# default mirrors LLM_MODEL so an unset env var does not silently put a
+# rate-limited provider (Groq free tier) in front of the chain.
+#
+# Lives here rather than in llm.py so that modules which only need to *name*
+# the chain (the service dashboard) do not have to import litellm, which costs
+# several seconds cold.
+DEFAULT_MODEL = "gemini/gemini-3.5-flash"
+
 
 def _int(name: str, default: int, low: int = 0, high: int = 10**9) -> int:
     try:

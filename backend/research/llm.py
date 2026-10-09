@@ -29,11 +29,11 @@ numbers, names, or URLs from your own knowledge. If the material does not
 support a point, say it is not established. An unsupported sentence is a
 failure, no matter how plausible it reads."""
 
-# Verified reachable on 2026-10-04. Any litellm model string works, but it must
-# carry a provider prefix and the matching provider key must be present.
-# The default mirrors LLM_MODEL so an unset env var does not silently put a
-# rate-limited provider (Groq free tier) in front of the chain.
-DEFAULT_MODEL = "gemini/gemini-3.5-flash"
+# Verified reachable on 2026-10-04. The default mirrors LLM_MODEL so an unset
+# env var does not silently put a rate-limited provider (Groq free tier) in
+# front of the chain. Defined in config so the service dashboard can read the
+# chain without importing litellm.
+from .config import DEFAULT_MODEL  # noqa: E402,F401  (re-exported)
 
 MAX_ATTEMPTS = 2
 BACKOFF_BASE_SECONDS = 1.0

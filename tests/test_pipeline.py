@@ -72,7 +72,10 @@ def test_graph_runs_end_to_end_with_mocks(monkeypatch):
 
     events = asyncio.run(run())
     types = [e["type"] for e in events]
-    assert types[0] == "plan"
+    # The service/credit banner is deliberately the first thing a run emits:
+    # you should see what the run depends on before it spends anything.
+    assert "services" in types
+    assert types.index("services") < types.index("plan")
     assert types[-1] == "report"
     assert "gap" in types
     assert events[-1]["data"] == "REPORT 3"  # 2 first-round + 1 follow-up
