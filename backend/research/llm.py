@@ -72,6 +72,11 @@ class CallBudget:
         self.reserve = reserve            # calls held back for later stages
         self.spent = 0
         self._os = _os
+        # Extraction batches and per-source synthesis run concurrently, so the
+        # check-and-increment in take() has to be one atomic step. Without it
+        # two threads both read remaining=1, both pass, and the run overspends
+        # its ceiling by however many raced.
+        self._lock = threading.Lock()
 
     @property
     def remaining(self) -> int:
@@ -83,19 +88,28 @@ class CallBudget:
         return self.remaining > 0
 
     def take(self, n: int = 1) -> bool:
-        """Reserve n calls. False when the general pool is exhausted."""
-        if self.remaining < n:
-            return False
-        self.spent += n
-        return True
+        """Reserve n calls. False when the general pool is exhausted.
+
+        Atomic: the ceiling is checked and claimed under one lock, so N threads
+        racing on a budget of K get exactly K successes.
+        """
+        with self._lock:
+            if self.remaining < n:
+                return False
+            self.spent += n
+            return True
 
     def spend(self, n: int = 1) -> None:
         """Record calls already made, bypassing the general-pool ceiling."""
-        self.spent += n
+        with self._lock:
+            self.spent += n
 
     def snapshot(self) -> dict:
-        return {"total": self.total, "spent": self.spent,
-                "remaining": self.remaining, "reserve": self.reserve}
+        with self._lock:
+            spent = self.spent
+        return {"total": self.total, "spent": spent,
+                "remaining": max(0, self.total - self.reserve - spent),
+                "reserve": self.reserve}
 
 
 def _models(role: str) -> list[str]:

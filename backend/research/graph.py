@@ -81,6 +81,7 @@ class State(TypedDict, total=False):
     budget: object                        # CallBudget, shared across stages
     retrieval_index: dict                 # url -> what was retrieved, whole run
     documents_by_url: dict                # url -> FetchedDoc, best seen
+    chunks_by_url: dict                   # url -> [Chunk], so re-chunking is done once
     status: dict                          # research completion state
     fetcher: object                      # Fetcher, so the fetch budget is per run
     evidence_stats: dict
@@ -311,9 +312,35 @@ async def retrieve(state):
 
     chunks: list = []
     by_url = {s["url"]: s for s in sources if s.get("url")}
+    # Chunks are cached per URL: without this every gap-check round re-ran
+    # chunk_document over the whole corpus to rebuild chunks that are
+    # byte-identical to last round (~1.4s of CPU per 100 large docs, per round).
+    #
+    # Keying on URL is safe even though source_id is positional
+    # ("S{n}" from enumerate below): known_documents is a dict carried in
+    # state, and overwriting an existing key does not move its insertion
+    # position, so a document keeps the same n -- and the same S1#2 style chunk
+    # ids -- for the whole run. A cached chunk cannot go stale that way.
+    #
+    # Caveat: cited_by comes from search metadata that can change between
+    # rounds, so a cached chunk keeps round 1's citation counts. Left alone
+    # deliberately; re-chunking to chase a citation count costs more than the
+    # number is worth.
+    # The grade is stored with the chunks so an upgrade invalidates the entry
+    # and an empty chunk list is still a cache hit rather than a re-chunk.
+    chunk_cache: dict = dict(state.get("chunks_by_url") or {})
     for source_id, doc in enumerate(known_documents.values(), 1):
+        cached = chunk_cache.get(doc.url)
+        # Invalidate on upgrade. Chunks carry retrieval_status, and both
+        # _unprocessed_chunks (reprocesses a source whose grade improved) and
+        # rank() (penalises metadata_only) read it off the chunk. A cached
+        # chunk from before an upgrade would freeze the worse grade, so the
+        # source would never be re-read and would stay ranked as a snippet.
+        if cached is not None and cached[0] == doc.status:
+            chunks.extend(cached[1])
+            continue
         meta = by_url.get(doc.url, {})
-        chunks.extend(chunk_document(
+        made = chunk_document(
             doc.text,
             source_id=f"S{source_id}",
             source_url=doc.url,
@@ -329,7 +356,9 @@ async def retrieve(state):
             entity=meta.get("entity", ""),
             entity_type=meta.get("entity_type", ""),
             cited_by=int(meta.get("cited_by", 0) or 0),
-        ))
+        )
+        chunk_cache[doc.url] = (doc.status, made)
+        chunks.extend(made)
 
     stats = _aggregate_retrieval(index, chunks, references_used)
     if unreadable:
@@ -343,6 +372,7 @@ async def retrieve(state):
     return {"documents": list(known_documents.values()), "chunks": chunks,
             "fetcher": fetcher, "retrieval_index": index,
             "documents_by_url": known_documents,
+            "chunks_by_url": chunk_cache,
             "retrieval_stats": stats, "notes": notes}
 
 
