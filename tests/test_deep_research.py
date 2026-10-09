@@ -636,7 +636,7 @@ class _StubFetcher:
         self.fetched = 0
         self.requested = []
 
-    def fetch_many(self, urls):
+    def fetch_many(self, urls, on_done=None):
         from backend.research.fetch import FAILED, FetchedDoc
 
         out = []
@@ -651,6 +651,9 @@ class _StubFetcher:
                                   method="html", title=f"Doc {url}",
                                   text=("body text about react native flutter android "
                                         "performance ") * 40, publisher="pub"))
+        if on_done is not None:
+            for doc in out:
+                on_done(doc)
         return [d for d in out if d.status != FAILED]
 
 

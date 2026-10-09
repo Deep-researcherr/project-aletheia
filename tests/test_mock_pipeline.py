@@ -77,7 +77,7 @@ def cited_numbers(text):
 def test_rounds_one_produces_the_full_sequence():
     order = types_of(run_sse("What is FastAPI?", 1))
 
-    assert order[0] == "plan"
+    assert order.index("services") < order.index("plan")
     for expected in ("results", "evidence", "gap", "contradictions", "report"):
         assert expected in order, f"missing {expected} in {order}"
     assert order[-1] == "done"
@@ -189,7 +189,7 @@ def test_llm_mock_fail_planner_falls_back_and_completes(monkeypatch):
     events = run_sse("What is FastAPI?", 1)
     order = types_of(events)
 
-    assert order[0] == "plan"
+    assert order.index("services") < order.index("plan")
     assert order[-1] == "done"
     assert "report" in order, f"the fallback plan must still produce a report: {order}"
     assert "error" not in order

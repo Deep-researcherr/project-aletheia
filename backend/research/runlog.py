@@ -9,6 +9,7 @@ anything. Bounded to the most recent runs; never raises.
 from __future__ import annotations
 
 import threading
+import time
 from collections import OrderedDict
 
 _KEEP_RUNS = 8
@@ -28,6 +29,11 @@ def begin(question: str, max_rounds: int) -> None:
         _runs[_key(question)] = {
             "question": question,
             "max_rounds": max_rounds,
+            # Wall clock at run start. The PDF prints the total, and the
+            # frontend's elapsed/remaining timer is anchored to it rather than
+            # to whenever the page happened to load.
+            "started_at": time.time(),
+            "elapsed_s": None,
             "plan": {},
             "searches": [],
             "evidence_count": 0,
@@ -35,6 +41,7 @@ def begin(question: str, max_rounds: int) -> None:
             "analysis": {},
             "gaps": [],
             "contradictions": [],
+            "progress": {},
             "sections": [],
             "report": "",
             "report_html": "",
@@ -58,7 +65,23 @@ def record(question: str, event: dict) -> None:
             if bundle is None:
                 return
             kind = event.get("type")
-            if kind == "plan":
+            if kind == "progress":
+                # Mid-stage progress (per-document fetch, per-batch extraction).
+                # Kept as a running tally so the PDF can say what the run was
+                # doing, without storing every URL it ever touched.
+                stage = str(event.get("stage") or "")
+                if stage:
+                    seen = bundle["progress"].setdefault(
+                        stage, {"done": 0, "total": 0, "note": ""})
+                    try:
+                        seen["done"] = int(event.get("done") or 0)
+                        seen["total"] = int(event.get("total") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                    note = str(event.get("note") or "")
+                    if note:
+                        seen["note"] = note[:160]
+            elif kind == "plan":
                 bundle["plan"] = event.get("data") or {}
             elif kind == "results":
                 bundle["searches"].append({
@@ -88,6 +111,11 @@ def record(question: str, event: dict) -> None:
                 bundle["stats"] = event.get("stats") or {}
                 bundle["export"] = event.get("export") or {}
                 bundle["status"] = event.get("status") or bundle["status"]
+                # Stamped when the report lands, so the figure printed on the
+                # cover is the time the run actually took, not the time the
+                # PDF happened to be requested.
+                started = bundle.get("started_at")
+                bundle["elapsed_s"] = (time.time() - started) if started else None
                 bundle["complete"] = True
             _runs.move_to_end(key)
     except Exception:

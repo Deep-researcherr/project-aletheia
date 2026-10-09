@@ -671,14 +671,31 @@ class Fetcher:
         return doc
 
     # -- batch -------------------------------------------------------------
-    def fetch_many(self, urls: list[str]) -> list[FetchedDoc]:
-        """Fetch concurrently, respecting the shared budget and per-URL isolation."""
+    def fetch_many(self, urls: list[str],
+                   on_done=None) -> list[FetchedDoc]:
+        """Fetch concurrently, respecting the shared budget and per-URL isolation.
+
+        ``on_done(doc)`` is called from the worker thread as each document
+        finishes, so a caller can report real per-document progress instead of
+        leaving the browser on a spinner for the whole batch. It must be cheap
+        and must not raise.
+        """
         unique = list(dict.fromkeys(u for u in urls if u))[: config.fetch_max_sources()]
         if not unique:
             return []
         workers = min(config.fetch_max_workers(), len(unique))
+
+        def task(url: str) -> FetchedDoc:
+            doc = self._safe_fetch(url)
+            if on_done is not None:
+                try:
+                    on_done(doc)
+                except Exception:       # progress reporting must not fail a fetch
+                    pass
+            return doc
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            docs = list(pool.map(self._safe_fetch, unique))
+            docs = list(pool.map(task, unique))
         return [d for d in docs if d.status != FAILED]
 
     def _safe_fetch(self, url: str) -> FetchedDoc:

@@ -1395,6 +1395,104 @@ details summary {
     padding: 0;
 }
 
+/* Run timer: elapsed and estimated remaining, sitting in the card header so it
+   reads as part of the progress panel rather than a separate widget. */
+.progress-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+}
+
+.progress-head h4 {
+    margin: 0;
+    font-size: 16px;
+}
+
+.run-timer {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px 10px;
+    border: 1px solid #242424;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.02);
+    font-variant-numeric: tabular-nums;
+}
+
+:root[data-theme="light"] .run-timer {
+    background: #F3EFE7;
+    border-color: #e3ddd0;
+}
+
+.run-timer[hidden] {
+    display: none;
+}
+
+.run-timer-block {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    line-height: 1.15;
+}
+
+.run-timer-value {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink);
+}
+
+.run-timer-label {
+    font-size: 9.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.run-timer-sep {
+    width: 1px;
+    align-self: stretch;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="light"] .run-timer-sep {
+    background: #e3ddd0;
+}
+
+.run-timer-bar {
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    bottom: 4px;
+    height: 2px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+:root[data-theme="light"] .run-timer-bar {
+    background: #e3ddd0;
+}
+
+.run-timer-bar-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 2px;
+    background: #C96442;
+    transition: width 0.6s ease;
+}
+
+.run-timer.is-done .run-timer-bar-fill {
+    background: #4C9A6A;
+}
+
+.run-timer.is-stalled .run-timer-value#run-timer-remaining {
+    color: #C96442;
+}
+
 .progress-step {
     position: relative;
     display: flex;

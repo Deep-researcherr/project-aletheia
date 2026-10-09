@@ -13,6 +13,10 @@ from .graph import graph
 from . import config
 from .runlog import begin as _begin_run, record as _record_event
 
+import logging
+
+log = logging.getLogger(__name__)
+
 
 def _section_html(markdown: str) -> str:
     from .markdown_html import render_markdown_html
@@ -23,6 +27,18 @@ async def deep_research(question: str, max_rounds: int = 3):
     evidence = []
     stats: dict = {}
     _begin_run(question, max_rounds)
+
+    # Say what the run depends on, and what is left of each budget, before it
+    # spends anything. Announced once per run rather than per stage, so the log
+    # stays readable, and never allowed to raise: a status line must not be able
+    # to take down a research run.
+    services = []
+    try:
+        from . import services as services_module
+        services = await services_module.announce(question)
+    except Exception as exc:
+        log.debug("service announcement unavailable: %s", exc)
+
     init = {
         "question": question,
         "max_rounds": max_rounds,
@@ -38,7 +54,20 @@ async def deep_research(question: str, max_rounds: int = 3):
         _record_event(question, event)
         return event
 
-    async for chunk in graph.astream(init, stream_mode="updates"):
+    if services:
+        yield emit({"type": "services",
+                    "data": [row.as_dict() for row in services]})
+
+    # "custom" carries progress events written from inside a stage via
+    # get_stream_writer(). retrieve and analyse are the two longest stages and
+    # used to emit nothing until they finished, so the browser sat on a frozen
+    # "Reading pages" for minutes with no idea anything was happening.
+    async for mode, chunk in graph.astream(init, stream_mode=["updates", "custom"]):
+        if mode == "custom":
+            # Already in the run-log event shape; recorded like any other.
+            yield emit(chunk)
+            continue
+
         for node, upd in chunk.items():
             if node == "planner":
                 yield emit({"type": "plan", "data": upd["plan"]})
@@ -114,7 +143,7 @@ async def deep_research(question: str, max_rounds: int = 3):
                                       "heading": heading,
                                       "data": markdown,
                                       "html": section_html})
-                yield emit({
+                report_event = emit({
                     "type": "report",
                     "data": upd["report"],
                     "html": upd.get("report_html") or "",
@@ -124,9 +153,41 @@ async def deep_research(question: str, max_rounds: int = 3):
                     "export": export,
                     "status": completion,
                 })
+                # Total wall clock for the run. Read after emit(), because
+                # emit() is what marks the bundle complete and stamps the
+                # duration; asking before that always returned None.
+                report_event["elapsed_s"] = _elapsed_for(question)
+                yield report_event
 
 
 def _export_meta(question: str) -> dict:
     """Where the markdown export was written, so the UI can offer a download."""
     from .export import last_export
     return last_export(question)
+
+
+def _elapsed_for(question: str):
+    """Wall clock for this run, read back from the recorded bundle."""
+    try:
+        from .runlog import get
+        bundle = get(question) or {}
+        return bundle.get("elapsed_s")
+    except Exception:
+        return None
+
+
+def format_duration(seconds) -> str:
+    """Human duration for the report cover: 4m 12s, 1h 03m 09s."""
+    try:
+        total = int(float(seconds))
+    except (TypeError, ValueError):
+        return "unknown"
+    if total < 0:
+        return "unknown"
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m {secs:02d}s"

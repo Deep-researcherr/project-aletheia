@@ -10,6 +10,16 @@ import os
 # is how a batch silently gets truncated by the provider.
 CHARS_PER_TOKEN = 3.5
 
+# Verified reachable on 2026-10-04. Any litellm model string works, but it must
+# carry a provider prefix and the matching provider key must be present. The
+# default mirrors LLM_MODEL so an unset env var does not silently put a
+# rate-limited provider (Groq free tier) in front of the chain.
+#
+# Lives here rather than in llm.py so that modules which only need to *name*
+# the chain (the service dashboard) do not have to import litellm, which costs
+# several seconds cold.
+DEFAULT_MODEL = "gemini/gemini-3.5-flash"
+
 
 def _int(name: str, default: int, low: int = 0, high: int = 10**9) -> int:
     try:
@@ -250,6 +260,18 @@ def extract_max_batches() -> int:
     return _int("EXTRACT_MAX_BATCHES", 40, 1, 200)
 
 
+def llm_parallelism() -> int:
+    """Model calls issued concurrently within a stage.
+
+    Extraction batches and per-source synthesis are independent of each other, so
+    they no longer run one after another. This is how many at a time; the
+    throttle (THROTTLE_LLM_MAX_CONCURRENT / _PER_MINUTE) still governs what the
+    provider actually sees, and stays the real limit -- raise this first and
+    lower it if the chain starts leaning on fallbacks.
+    """
+    return _int("LLM_PARALLELISM", 4, 1, 32)
+
+
 def max_evidence_records() -> int:
     """Cap on structured evidence kept for the report."""
     return _int("MAX_EVIDENCE_RECORDS", 400, 4, 2000)
@@ -345,13 +367,31 @@ def throttle_llm() -> bool:
 
 
 def throttle_llm_per_minute() -> float:
-    """Ceiling on model calls per minute. 0 disables pacing."""
-    return _float("THROTTLE_LLM_PER_MINUTE", 12.0, 0.0, 10_000.0)
+    """Ceiling on model calls per minute. 0 disables pacing.
+
+    Each call waits for its own slot, so this sets the floor on how long a
+    stage of N calls takes: N * 60/per_minute seconds.
+
+    14, not higher: the lead model (Gemini free tier) enforces its own
+    per-minute quota below this, and running above it does not go faster -- it
+    converts calls into 429s, which burn a fallback attempt each and push the
+    work onto weaker models. Measured at 30/min: three separate 429 storms in
+    one run, with extraction quality visibly worse on the fallback model.
+    Raise this only with a provider that has the headroom, and watch the log
+    for "rate limited: 429 per-minute quota".
+    """
+    return _float("THROTTLE_LLM_PER_MINUTE", 14.0, 0.0, 10_000.0)
 
 
 def throttle_llm_max_concurrent() -> int:
-    """Model calls in flight at once. 1 serialises across concurrent runs too."""
-    return _int("THROTTLE_LLM_MAX_CONCURRENT", 1, 1, 64)
+    """Model calls in flight at once.
+
+    Was 1, which serialised every stage even though extraction batches and
+    per-source synthesis calls are independent of each other. Extraction and
+    synthesis now issue calls concurrently (see LLM_PARALLELISM), so this has
+    to allow more than one or the pool just queues behind itself.
+    """
+    return _int("THROTTLE_LLM_MAX_CONCURRENT", 4, 1, 64)
 
 
 def throttle_search() -> bool:

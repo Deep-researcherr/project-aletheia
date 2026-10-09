@@ -104,7 +104,25 @@
 
             <div class="card progress-card" id="progress-card">
 
-                <h4>Research progress</h4>
+                <div class="progress-head">
+                    <h4>Research progress</h4>
+                    <div class="run-timer" id="run-timer" hidden
+                         role="timer" aria-live="off">
+                        <div class="run-timer-block">
+                            <span class="run-timer-value" id="run-timer-elapsed">0s</span>
+                            <span class="run-timer-label">elapsed</span>
+                        </div>
+                        <div class="run-timer-sep" aria-hidden="true"></div>
+                        <div class="run-timer-block">
+                            <span class="run-timer-value"
+                                  id="run-timer-remaining">estimating…</span>
+                            <span class="run-timer-label">remaining</span>
+                        </div>
+                        <div class="run-timer-bar" aria-hidden="true">
+                            <div class="run-timer-bar-fill" id="run-timer-fill"></div>
+                        </div>
+                    </div>
+                </div>
 
                 <ol class="progress-list" id="progress-list">
                     <li class="progress-step" data-step="plan">
@@ -129,6 +147,13 @@
                             <small id="prog-read-detail">Waiting for downloads…</small>
                         </div>
                     </li>
+                    <li class="progress-step" data-step="analyse">
+                        <span class="progress-icon" aria-hidden="true"></span>
+                        <div class="progress-body">
+                            <strong id="prog-analyse-title">Extracting evidence</strong>
+                            <small id="prog-analyse-detail">Waiting for passages…</small>
+                        </div>
+                    </li>
                     <li class="progress-step hidden" data-step="gap">
                         <span class="progress-icon" aria-hidden="true"></span>
                         <div class="progress-body">
@@ -139,7 +164,7 @@
                     <li class="progress-step" data-step="write">
                         <span class="progress-icon" aria-hidden="true"></span>
                         <div class="progress-body">
-                            <strong>Writing the report</strong>
+                            <strong id="prog-write-title">Writing the report</strong>
                             <small id="prog-write-detail">Waiting for sections…</small>
                         </div>
                     </li>

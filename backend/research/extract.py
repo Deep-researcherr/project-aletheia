@@ -16,6 +16,7 @@ That means a surviving record's provenance is real rather than asserted.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from . import config
 from .chunker import Chunk
@@ -109,6 +110,54 @@ def plan_batches(scored: list[Scored]) -> list[list[Scored]]:
     return batches[: config.extract_max_batches()]
 
 
+# Marks a note as an evidence-integrity failure rather than an observation.
+# Notes are advisory; anything carrying this prefix must reach the reader, and
+# downgrades the run to PARTIAL, because it means the report is built on less
+# evidence than it appears to be.
+INTEGRITY_PREFIX = "Evidence integrity: "
+
+
+def integrity_notes(notes) -> list[str]:
+    """The subset of notes that mean the evidence base is compromised."""
+    return [n for n in (notes or []) if str(n).startswith(INTEGRITY_PREFIX)]
+
+
+def _run_parallel(items: list, worker, parallelism: int) -> list:
+    """Apply ``worker`` across ``items`` concurrently, returning results in ORDER.
+
+    Completion order is deliberately discarded: callers depend on positional
+    stability because evidence_id and the notes list are both derived from
+    submission order. A worker that raises yields None rather than taking the
+    whole stage down, matching the per-batch isolation of the serial loop.
+    """
+    if parallelism <= 1 or len(items) <= 1:
+        out = []
+        for item in items:
+            try:
+                out.append(worker(item))
+            except Exception as exc:               # pragma: no cover - defensive
+                log.warning("parallel worker failed: %s: %s",
+                            type(exc).__name__, str(exc)[:160])
+                out.append(None)
+        return out
+
+    results: list = [None] * len(items)
+
+    def guarded(index: int, item):
+        try:
+            return index, worker(item)
+        except Exception as exc:
+            log.warning("parallel worker failed: %s: %s",
+                        type(exc).__name__, str(exc)[:160])
+            return index, None
+
+    with ThreadPoolExecutor(max_workers=min(parallelism, len(items))) as pool:
+        for index, value in pool.map(
+                lambda pair: guarded(pair[0], pair[1]), list(enumerate(items))):
+            results[index] = value
+    return results
+
+
 def extract_evidence(
     scored: list[Scored],
     question: str,
@@ -133,36 +182,120 @@ def extract_evidence(
     records: list[Evidence] = []
     calls = 0
 
-    for number, batch in enumerate(batches, 1):
-        if budget is not None and not budget.take(1):
-            notes.append(f"LLM call budget reached after {number - 1} extraction "
-                         f"batches; {len(batches) - number + 1} batches left unanalysed")
-            break
-        calls += 1
+    # Batches are independent: each sends its own passages and _harvest
+    # validates the reply against exactly those. So they run concurrently, in
+    # waves of `parallelism`, with the throttle as the real governor.
+    #
+    # Results are reassembled in submission order, never completion order:
+    # evidence_id is assigned by enumerate() after dedupe() below, so collecting
+    # in completion order would renumber every citation in the report from one
+    # run of the same question to the next.
+    parallelism = max(1, config.llm_parallelism())
+
+    def run_batch(number: int, batch: list[Scored]):
+        """One extraction call. Returns (records, rejected, error) and never raises."""
         payload = _render_batch(batch, question, dims, tgts)
         try:
             reply = ask(EXTRACT_SYSTEM, payload, json_mode=True, role="judge")
         except LLMChainError as exc:
-            notes.append(f"extraction batch {number} failed: {exc}")
             log.warning("extraction batch %d failed: %s", number, exc)
-            continue
+            return [], 0, f"failed: {exc}"
         except Exception as exc:                       # a bad batch must not kill the run
-            notes.append(f"extraction batch {number} errored: {type(exc).__name__}")
             log.warning("extraction batch %d errored: %s: %s", number,
                         type(exc).__name__, str(exc)[:160])
-            continue
-
+            return [], 0, f"errored: {type(exc).__name__}"
         accepted, rejected = _harvest(reply, batch, by_id)
-        records.extend(accepted)
-        if rejected:
-            notes.append(f"extraction batch {number}: discarded {rejected} unverified "
-                         f"record(s) whose quote was not present in the passage")
-        log.info("extraction batch %d: %d passages -> %d records (%d rejected)",
-                 number, len(batch), len(accepted), rejected)
+        return accepted, rejected, None
+
+    # Batches that came back with nothing at all. A batch can legitimately
+    # yield no records (the extraction prompt tells the model to skip passages
+    # with nothing useful), but a run where most batches return nothing has not
+    # extracted anything, and saying so is the whole point of this stage. The
+    # counters exist so that case is visible instead of silent.
+    silent_empty = 0
+    failed_batches = 0
+    attempted_batches = 0
+
+    index = 0
+    while index < len(batches):
+        full_wave = batches[index:index + parallelism]
+        wave = full_wave
+        clipped = False
+        if budget is not None:
+            # Claim the wave's calls up front, one at a time, so a budget of 3
+            # with parallelism 4 runs 3 batches and stops -- the same
+            # truncation the serial loop produced.
+            claimed = 0
+            for _ in wave:
+                if not budget.take(1):
+                    break
+                claimed += 1
+            wave = wave[:claimed]
+            clipped = len(wave) < len(full_wave)
+        if not wave:
+            notes.append(
+                f"LLM call budget reached after {index} extraction "
+                f"batches; {len(batches) - index} batches left unanalysed")
+            break
+        numbered = list(enumerate(wave, index + 1))
+        results = _run_parallel(
+            [(n, b) for n, b in numbered],
+            lambda item: run_batch(item[0], item[1]),
+            parallelism,
+        )
+
+        for (number, batch), (accepted, rejected, error) in zip(numbered, results):
+            attempted_batches += 1
+            if error is not None:
+                failed_batches += 1
+                kind, _, detail = error.partition(": ")
+                notes.append(f"extraction batch {number} {kind}: {detail}")
+                continue
+            calls += 1
+            records.extend(accepted)
+            if not accepted and not rejected:
+                # No records and nothing discarded: the model answered, but
+                # with nothing usable. Previously this produced no note at all,
+                # so a run could lose most of its batches and still be
+                # reported as complete.
+                silent_empty += 1
+                notes.append(
+                    f"extraction batch {number} returned no evidence for "
+                    f"{len(batch)} passage(s) and rejected nothing, so the "
+                    f"model's reply for these passages was unusable")
+                log.warning("extraction batch %d returned nothing usable "
+                            "(%d passages)", number, len(batch))
+            if rejected:
+                notes.append(f"extraction batch {number}: discarded {rejected} unverified "
+                             f"record(s) whose quote was not present in the passage")
+            log.info("extraction batch %d: %d passages -> %d records (%d rejected)",
+                     number, len(batch), len(accepted), rejected)
+        index += len(wave)
+        if clipped:
+            # Say so even when the clipped wave still ran: a report that quietly
+            # analysed 3 of 8 batches must not read as a complete pass.
+            notes.append(
+                f"LLM call budget reached after {index} extraction "
+                f"batches; {len(batches) - index} batches left unanalysed")
+            break
 
     records = dedupe(records)
-    for index, record in enumerate(records, 1):
-        record.evidence_id = f"E{index}"
+    for position, record in enumerate(records, 1):
+        record.evidence_id = f"E{position}"
+
+    # Integrity check. If most extraction batches yielded nothing, the evidence
+    # base is not what a reader would assume it is, and the report must not
+    # claim otherwise. Marked so the report layer can surface it rather than
+    # filing it as an ordinary note.
+    if attempted_batches and silent_empty >= max(1, (attempted_batches + 1) // 2):
+        notes.insert(0, INTEGRITY_PREFIX + (
+            f"evidence extraction returned nothing usable for "
+            f"{silent_empty} of {attempted_batches} passage batches"
+            + (f", and {failed_batches} batch(es) failed outright"
+               if failed_batches else "")
+            + " — the findings below rest on a partial evidence base"))
+        log.error("evidence extraction degraded: %d/%d batches unusable",
+                  silent_empty, attempted_batches)
 
     # Target fidelity: evidence about a related-but-different variant (another
     # release, another architecture class) is capped at moderate and labelled,
@@ -181,8 +314,8 @@ def extract_evidence(
         records.sort(key=lambda r: (r.rank, -r.confidence))
         notes.append(f"evidence set trimmed from {len(records)} to {cap} records")
         records = records[:cap]
-        for index, record in enumerate(records, 1):
-            record.evidence_id = f"E{index}"
+        for position, record in enumerate(records, 1):
+            record.evidence_id = f"E{position}"
 
     if calls == 0 and batches:
         notes.append("no extraction calls were made")
@@ -329,8 +462,10 @@ def synthesise_sources(
     for record in records:
         grouped.setdefault(record.source_id or record.source_url, []).append(record)
 
-    out: dict[str, dict] = {}
-
+    # One call per source, and each call is independent of every other, so they
+    # run concurrently in waves. Results are reassembled in submission order so
+    # the returned dict iterates sources in the same order as before.
+    candidates: list[tuple[str, list[Evidence]]] = []
     for source_id, group_records in grouped.items():
         # Low-value work is skipped, not paid for: a source whose findings are
         # all weak or worse contributes no assessable weight, so synthesising
@@ -338,9 +473,9 @@ def synthesise_sources(
         if not any(r.quality in ("strong", "moderate") for r in group_records):
             log.info("source synthesis skipped weak-only source %s", source_id)
             continue
-        if budget is not None and not budget.take(1):
-            log.info("source synthesis truncated: budget exhausted")
-            break
+        candidates.append((source_id, group_records))
+
+    def run_one(source_id: str, group_records: list[Evidence]):
         head = group_records[0]
         payload = (
             f"\n=== SOURCE {source_id} ===\n{head.citation}\n{head.usable_url}\n"
@@ -350,19 +485,43 @@ def synthesise_sources(
             reply = ask(SYNTH_SYSTEM, payload, json_mode=True, role="synth")
         except LLMChainError as exc:
             log.warning("source synthesis failed: %s", exc)
-            continue
+            return None
         except Exception as exc:
             log.warning("source synthesis errored: %s", exc)
-            continue
-
+            return None
         if isinstance(reply, dict) and isinstance(reply.get("summary"), str):
-            out[source_id] = {
+            return {
                 "summary": reply["summary"][:900],
                 "supports": _str_list(reply.get("supports"))[:8],
                 "does_not_support": _str_list(reply.get("does_not_support"))[:6],
                 "weight": normalise_quality(reply.get("weight")),
                 "caveats": str(reply.get("caveats") or "")[:400],
             }
+        return None
+
+    out: dict[str, dict] = {}
+    parallelism = max(1, config.llm_parallelism())
+    index = 0
+    while index < len(candidates):
+        wave = candidates[index:index + parallelism]
+        if budget is not None:
+            claimed = 0
+            for _ in wave:
+                if not budget.take(1):
+                    break
+                claimed += 1
+            if claimed < len(wave):
+                log.info("source synthesis truncated: budget exhausted")
+            wave = wave[:claimed]
+            if not wave:
+                break
+        results = _run_parallel(wave, lambda item: run_one(*item), parallelism)
+        for (source_id, _records), value in zip(wave, results):
+            if value:
+                out[source_id] = value
+        index += len(wave)
+        if budget is not None and claimed < parallelism:
+            break
     return out
 
 

@@ -29,11 +29,11 @@ numbers, names, or URLs from your own knowledge. If the material does not
 support a point, say it is not established. An unsupported sentence is a
 failure, no matter how plausible it reads."""
 
-# Verified reachable on 2026-10-04. Any litellm model string works, but it must
-# carry a provider prefix and the matching provider key must be present.
-# The default mirrors LLM_MODEL so an unset env var does not silently put a
-# rate-limited provider (Groq free tier) in front of the chain.
-DEFAULT_MODEL = "gemini/gemini-3.5-flash"
+# Verified reachable on 2026-10-04. The default mirrors LLM_MODEL so an unset
+# env var does not silently put a rate-limited provider (Groq free tier) in
+# front of the chain. Defined in config so the service dashboard can read the
+# chain without importing litellm.
+from .config import DEFAULT_MODEL  # noqa: E402,F401  (re-exported)
 
 MAX_ATTEMPTS = 2
 BACKOFF_BASE_SECONDS = 1.0
@@ -72,6 +72,11 @@ class CallBudget:
         self.reserve = reserve            # calls held back for later stages
         self.spent = 0
         self._os = _os
+        # Extraction batches and per-source synthesis run concurrently, so the
+        # check-and-increment in take() has to be one atomic step. Without it
+        # two threads both read remaining=1, both pass, and the run overspends
+        # its ceiling by however many raced.
+        self._lock = threading.Lock()
 
     @property
     def remaining(self) -> int:
@@ -83,19 +88,28 @@ class CallBudget:
         return self.remaining > 0
 
     def take(self, n: int = 1) -> bool:
-        """Reserve n calls. False when the general pool is exhausted."""
-        if self.remaining < n:
-            return False
-        self.spent += n
-        return True
+        """Reserve n calls. False when the general pool is exhausted.
+
+        Atomic: the ceiling is checked and claimed under one lock, so N threads
+        racing on a budget of K get exactly K successes.
+        """
+        with self._lock:
+            if self.remaining < n:
+                return False
+            self.spent += n
+            return True
 
     def spend(self, n: int = 1) -> None:
         """Record calls already made, bypassing the general-pool ceiling."""
-        self.spent += n
+        with self._lock:
+            self.spent += n
 
     def snapshot(self) -> dict:
-        return {"total": self.total, "spent": self.spent,
-                "remaining": self.remaining, "reserve": self.reserve}
+        with self._lock:
+            spent = self.spent
+        return {"total": self.total, "spent": spent,
+                "remaining": max(0, self.total - self.reserve - spent),
+                "reserve": self.reserve}
 
 
 def _models(role: str) -> list[str]:
