@@ -100,6 +100,34 @@ def fix_maths(raw):
     return t
 
 
+def _cite(n: str, sep: str = "", known=None) -> str:
+    """One superscript citation, optionally carrying a trailing separator.
+
+    The separator has to live *inside* the ``<super>`` element. ReportLab
+    decides word boundaries from the tag structure, so a space or ``&nbsp;``
+    placed between two ``<a>`` elements does not split them and adjacent
+    citations fuse: ``[19][10][20]`` came out as the single number ``191020``,
+    which is not just ugly but wrong -- it reads as one citation to a document
+    numbered 191020. Zero-width characters are worse: this font has no glyph
+    for them and they render as tofu boxes.
+
+    Only the gap between citations needs the separator, so the caller passes it
+    for every element except the last and no trailing space is left behind.
+    """
+    inner = f'<font size="8"><b>{n}</b></font>{sep}'
+    if known is None or n in known:
+        return (f'<a href="#ref-{n}" color="#1D4ED8">'
+                f"<super>{inner}</super></a>")
+    return f"<super>{inner}</super>"
+
+
+# One or more adjacent bracketed groups: [3], [19][10][20], [2, 5, 9].
+# Matching the whole run at once is what lets the separator be placed *between*
+# its members; substituting each [n] separately makes that impossible, and the
+# numbers fuse into "191020".
+_BRACKET_RUN = re.compile(r"(?:\[[\d,\s]*\d[\d,\s]*\])+")
+
+
 def fix_cites(raw, known=None):
     """[n], [n][m] and [a, b, c] -> tappable superscript links to #ref-n.
 
@@ -107,26 +135,12 @@ def fix_cites(raw, known=None):
     without a matching ``<a name>`` anchor crashes the whole build, so a
     citation with no reference entry stays plain superscript instead.
     """
-    def multi(m):
-        out = []
-        for n in re.findall(r"\d+", m.group(0)):
-            if known is None or n in known:
-                out.append(
-                    f'<a href="#ref-{n}" color="#1D4ED8">'
-                    f"<super><font size=\"8\"><b>{n}</b></font></super></a>")
-            else:
-                out.append(f"<super><font size=\"8\"><b>{n}</b></font></super>")
-        return "".join(out)
+    def run(m):
+        nums = re.findall(r"\d+", m.group(0))
+        return "".join(_cite(n, "&#160;" if i < len(nums) - 1 else "", known)
+                       for i, n in enumerate(nums))
 
-    def single(m):
-        n = m.group(1)
-        if known is None or n in known:
-            return (f'<a href="#ref-{n}" color="#1D4ED8">'
-                    f"<super><font size=\"8\"><b>{n}</b></font></super></a>")
-        return f"<super><font size=\"8\"><b>{n}</b></font></super>"
-
-    t = re.sub(r"\[(?:\d+\s*,\s*)+\d+\]", multi, raw)
-    return re.sub(r"\[(\d+)\]", single, t)
+    return _BRACKET_RUN.sub(run, raw)
 
 
 def para(raw, known=None):
@@ -306,9 +320,8 @@ def P(txt, S, style="body"):
     return Paragraph(txt, S[style])
 
 
-def C(n):
-    return (f'<a href="#ref-{n}" color="#1D4ED8">'
-            f"<super><font size=\"8\"><b>{n}</b></font></super></a>")
+def C(n, sep=""):
+    return _cite(str(n), sep)
 
 
 def simple_table(S, header, rows, widths):

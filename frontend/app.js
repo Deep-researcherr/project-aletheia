@@ -714,6 +714,60 @@ if (questionInput) {
 }
 
 
+// --- auto-scroll that yields to the reader ---------------------------------
+//
+// Every streamed event used to call results.scrollIntoView(). A run emits
+// hundreds of events, so a viewer who had scrolled down to watch the sources
+// tab was yanked back to the top of the report on each one, and could not
+// scroll away at all. The page now follows the run only while the reader has
+// not taken control, and hands control straight back the moment they do.
+//
+// Intent is detected from input events, not scroll position: a programmatic
+// smooth scroll also fires "scroll", so position alone cannot tell the two
+// apart and the page would disarm itself.
+
+const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown",
+    "Home", "End", " ", "Spacebar"]);
+
+let readerHasControl = false;
+
+function readerTookControl() {
+    readerHasControl = true;
+}
+
+function readerReturnedToTop() {
+    if (window.scrollY <= 8) {
+        readerHasControl = false;
+    }
+}
+
+window.addEventListener("wheel", readerTookControl, {passive: true});
+window.addEventListener("touchmove", readerTookControl, {passive: true});
+window.addEventListener("scroll", readerReturnedToTop, {passive: true});
+window.addEventListener("keydown", (event) => {
+    if (SCROLL_KEYS.has(event.key)) {
+        readerTookControl();
+    }
+});
+
+
+function followRun() {
+    if (readerHasControl || !results) {
+        return;
+    }
+    // Already showing the top of the results panel: re-scrolling on every one
+    // of hundreds of events fights the browser's own smooth-scroll animation
+    // and makes the panel jitter.
+    if (Math.abs(results.getBoundingClientRect().top) < 24) {
+        return;
+    }
+    results.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+    });
+}
+
+
 form.addEventListener("submit", async (event) => {
     event.preventDefault();
 
@@ -920,6 +974,9 @@ function displayEvent(data, question) {
 
     if (data.type === "plan") {
         timerReset();
+        // A new run earns the page's attention back, even if the reader had
+        // taken control during the previous one.
+        readerHasControl = false;
         timerStage("plan");
         renderPlan(data.data);
         progressPlan(data.data);
@@ -1021,10 +1078,7 @@ function displayEvent(data, question) {
         timerFinish();
     }
 
-    results.scrollIntoView({
-        behavior: "smooth",
-        block: "start"
-    });
+    followRun();
 }
 
 

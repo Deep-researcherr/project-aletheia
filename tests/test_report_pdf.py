@@ -114,11 +114,64 @@ def test_fix_cites_skips_numbers_without_references():
     assert ">9<" in out
 
 
+def _bundle_with_body(body: str) -> dict:
+    """The standard bundle with `body` substituted for its findings text.
+
+    The reference list is fixed at two entries, so citation forms are rendered
+    against the reference numbers that actually exist in the document.
+    """
+    bundle = _bundle()
+    bundle["report"] = bundle["report"].replace(
+        "Solubility ($\\log S$) rises with descriptors [1]. "
+        "Error falls from 0.84 to 0.35 [1][2].", body)
+    return bundle
+
+
 def _text_of(pdf: bytes) -> str:
     from pypdf import PdfReader
     import io
     return "\n".join(p.extract_text() or ""
                       for p in PdfReader(io.BytesIO(pdf)).pages)
+
+
+def test_adjacent_citations_do_not_fuse_into_one_number():
+    """[19][10][20] rendered as "191020".
+
+    ReportLab decides word boundaries from tag structure, so back-to-back
+    <a><super> elements merge into a single word. That is not only ugly: 191020
+    reads as one citation to a document numbered 191020, so the report was
+    citing something that does not exist.
+    """
+    from backend.research.pdf_report import fix_cites
+
+    known = {"2", "3", "5", "7", "9", "10", "19", "20"}
+    for text, expected in (
+        ("[19][10][20]", "19 10 20"),
+        ("[3][7]", "3 7"),
+        ("[2, 5, 9]", "2 5 9"),
+        ("claim [19][10] here", "claim 19 10 here"),
+        ("[19][10][20][3]", "19 10 20 3"),
+        # [1] and [2] exist in this bundle, so these exercise the *linked*
+        # anchor path rather than the plain-superscript fallback. The fusion
+        # bug had to be fixed in both.
+        ("[1][2]", "1 2"),
+        ("[1] and [2]", "1 and 2"),
+    ):
+        rendered = _text_of(pdf_report.build_pdf(
+            _bundle_with_body(text), "2 rounds", ""))
+        flat = " ".join(rendered.split())
+        assert expected in flat, (
+            f"{text!r} should render as {expected!r}, got a page containing "
+            f"{expected.replace(' ', '')!r} fused: "
+            f"{[ln for ln in rendered.splitlines() if expected.replace(' ', '')[:6] in ln.replace(' ', '')]}")
+
+
+def test_single_citation_has_no_trailing_gap():
+    """The separator goes between citations only."""
+    from backend.research.pdf_report import fix_cites
+
+    html = fix_cites("[3]", {"3"})
+    assert "&#160;" not in html, "a lone citation must not carry a separator"
 
 
 def test_duration_is_printed_on_the_cover():

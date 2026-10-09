@@ -170,6 +170,107 @@ def test_every_visible_step_is_ticked_when_the_report_lands(js):
         assert out["states"].get(step) == "done", f"{step} left as {out['states'].get(step)}"
 
 
+# --- auto-scroll -----------------------------------------------------------
+
+SCROLL_HARNESS = """
+var scrollCalls = 0;
+var PANEL_TOP = 400;
+var LISTENERS = {};
+var window = { scrollY: 0,
+    addEventListener: function (t, f) {
+        (LISTENERS[t] = LISTENERS[t] || []).push(f);
+    } };
+var results = {
+    scrollIntoView: function () { scrollCalls++; },
+    getBoundingClientRect: function () { return {top: PANEL_TOP}; },
+};
+function fire(type, event) {
+    (LISTENERS[type] || []).forEach(function (fn) { fn(event || {}); });
+}
+"""
+
+
+@pytest.fixture
+def scroller():
+    """The real registration block, not a hand-wired copy of it.
+
+    `readerHasControl` is declared with `let` inside app.js's block, so the
+    harness must not declare it -- doing so is an illegal redefinition. One
+    combined eval keeps the whole thing in one global scope.
+    """
+    wiring = APP[APP.index("const SCROLL_KEYS"): APP.index("function followRun()")]
+    interp = dukpy.JSInterpreter()
+    interp.evaljs("\n".join([SCROLL_HARNESS, wiring, _extract("followRun")]))
+    return interp
+
+
+def _s(scroller, code):
+    return scroller.evaljs(code)
+
+
+def test_page_follows_the_run_while_the_reader_has_not_scrolled(scroller):
+    _s(scroller, "PANEL_TOP = 400; followRun();")
+    assert _s(scroller, "scrollCalls") == 1
+
+
+def test_reading_input_hands_the_page_back_to_the_reader(scroller):
+    """The bug: on the sources tab, every event yanked the view away."""
+    _s(scroller, "fire('wheel'); PANEL_TOP = 400; followRun();")
+    assert _s(scroller, "readerHasControl") is True
+    assert _s(scroller, "scrollCalls") == 0, \
+        "the page must not fight a reader who is scrolling"
+
+
+def test_touch_and_keyboard_also_take_control(scroller):
+    for kind, payload in (("touchmove", {}),
+                          ("keydown", {"key": "ArrowDown"}),
+                          ("keydown", {"key": "PageDown"})):
+        _s(scroller, "readerHasControl = false;")
+        _s(scroller, f"fire({kind!r}, {payload!r});")
+        assert _s(scroller, "readerHasControl") is True, kind
+
+
+def test_a_keypress_that_does_not_scroll_is_ignored(scroller):
+    _s(scroller, "fire('keydown', {key: 'a'});")
+    assert _s(scroller, "readerHasControl") is False
+
+
+def test_returning_to_the_top_re_arms_following(scroller):
+    _s(scroller, "fire('wheel');")
+    assert _s(scroller, "readerHasControl") is True
+    _s(scroller, "window.scrollY = 0; fire('scroll');")
+    assert _s(scroller, "readerHasControl") is False
+    _s(scroller, "PANEL_TOP = 400; followRun();")
+    assert _s(scroller, "scrollCalls") == 1
+
+
+def test_scrolling_within_the_page_does_not_disarm(scroller):
+    """Only reaching the top re-arms; scrolling further down must not."""
+    _s(scroller, "fire('wheel');")
+    _s(scroller, "window.scrollY = 900; fire('scroll');")
+    assert _s(scroller, "readerHasControl") is True
+
+
+def test_no_scroll_when_the_panel_is_already_in_place(scroller):
+    """Hundreds of events each re-scrolling causes visible jitter."""
+    _s(scroller, "PANEL_TOP = 0; followRun();")
+    assert _s(scroller, "scrollCalls") == 0
+
+
+def test_repeated_events_do_not_stack_scroll_animations(scroller):
+    for _ in range(50):
+        _s(scroller, "PANEL_TOP = 400; followRun();")
+    # One follow, then the panel is "in place" only if we model it moving;
+    # with a static rect every call scrolls, so assert it is bounded per call.
+    assert _s(scroller, "scrollCalls") == 50
+    _s(scroller, "PANEL_TOP = 0;")
+    before = _s(scroller, "scrollCalls")
+    for _ in range(50):
+        _s(scroller, "followRun();")
+    assert _s(scroller, "scrollCalls") == before, \
+        "a settled panel must stop being scrolled entirely"
+
+
 # --- run timer -------------------------------------------------------------
 
 TIMER_HARNESS = """
