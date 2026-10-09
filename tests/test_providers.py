@@ -93,7 +93,7 @@ def test_provider_without_a_key_is_absent_not_broken(monkeypatch):
     provider = providers.search_providers()["exa"]
     assert provider.run_search("anything", 3) == ([], {})
     assert providers.wired_search_providers() == {}
-    assert providers.wired_extract_providers() == []
+    assert providers.wired_extract_tiers() == []
 
 
 def test_a_provider_can_be_switched_off_without_deleting_its_key(monkeypatch):
@@ -232,7 +232,7 @@ def test_two_rejected_keys_pause_a_provider_and_then_it_is_skipped():
     provider = providers.search_providers()["exa"]
     assert not provider.wired
     assert "exa" not in providers.wired_search_providers()
-    assert "exa" not in [p.name for p in providers.wired_extract_providers()]
+    assert "exa" not in [p.name for p in providers.wired_extract_tiers()]
 
 
 def test_a_success_clears_the_quarantine(monkeypatch):
@@ -410,6 +410,67 @@ def test_an_extractor_hitting_its_cap_is_skipped_not_spent(walled, monkeypatch):
 
     assert second.method == "tavily", "a capped tier must not be retried"
     assert fetcher.paid_used("jina") == 1
+
+
+def test_a_raising_tier_does_not_re_run_the_whole_chain(walled, monkeypatch):
+    """One malformed provider response must cost one tier, not one of each.
+
+    ``fetch()`` wraps ``_with_fallback`` in its own try/except and then calls
+    ``_with_fallback`` again on the way out. So any exception escaping the chain
+    used to unwind into that handler and re-run every provider from the top --
+    billing five providers twice over for a single URL. Pre-existing, and
+    invisible until a provider returns something malformed.
+    """
+    from backend.research.fetch import Fetcher
+
+    for name in ("JINA", "TINYFISH", "TAVILY", "SCRAPINGBEE", "FIRECRAWL"):
+        monkeypatch.setenv(f"{name}_API_KEY", "k")
+    _stub_extractors(monkeypatch,
+                     jina=("J", "good body " * 60),
+                     tinyfish=("T", "good body " * 60),
+                     tavily=("V", "good body " * 60),
+                     scrapingbee=("S", "good body " * 60),
+                     firecrawl=("F", "good body " * 60))
+
+    def boom(*args, **kwargs):
+        raise ValueError("malformed provider response")
+
+    monkeypatch.setattr(Fetcher, "_external_doc", staticmethod(boom))
+
+    fetcher = Fetcher(session=walled)
+    fetcher.fetch("https://walled.dev/article")
+
+    spent = fetcher._paid_used
+    assert sum(spent.values()) == len(spent), (
+        f"each tier was billed more than once for one fetch: {spent}")
+
+
+def test_a_raising_tier_does_not_abandon_the_rest_of_the_chain(walled,
+                                                               monkeypatch):
+    """A broken tier must be skipped, not fatal -- the page may still be
+    readable further down the chain."""
+    from backend.research.fetch import Fetcher
+
+    monkeypatch.setenv("JINA_API_KEY", "k")
+    monkeypatch.setenv("TAVILY_API_KEY", "k")
+    _stub_extractors(monkeypatch,
+                     jina=("J", "good body " * 60),
+                     tavily=("T", "tavily body " * 60))
+
+    real = Fetcher._external_doc
+
+    # _external_doc is a staticmethod, so it takes no self here.
+    def only_jina_breaks(url, title, text, method):
+        if method == "jina_reader":
+            raise ValueError("malformed provider response")
+        return real(url, title, text, method)
+
+    monkeypatch.setattr(Fetcher, "_external_doc", staticmethod(only_jina_breaks))
+
+    fetcher = Fetcher(session=walled)
+    doc = fetcher.fetch("https://walled.dev/article")
+    assert doc.status == "full"
+    assert doc.method == "tavily", "the chain must continue past a broken tier"
 
 
 def test_no_wired_extractor_leaves_the_failure_visible(walled, monkeypatch):

@@ -667,17 +667,6 @@ def wired_extract_tiers() -> list[Provider]:
     return [p for p in extract_tiers() if p.wired]
 
 
-def wired_extract_providers() -> list[Provider]:
-    """Every usable extract provider, unordered.
-
-    For callers that genuinely want all of them (the run report's recovery
-    breakdown, diagnostics). The fetch path uses :func:`wired_extract_tiers`,
-    which is ordered, because a chain that stops at the first success is what
-    keeps a run from paying four times for one page.
-    """
-    return [p for p in extract_tiers() if p.wired]
-
-
 def wired_search_providers() -> dict[str, Provider]:
     return {name: p for name, p in search_providers().items() if p.wired}
 

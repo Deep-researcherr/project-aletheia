@@ -326,7 +326,18 @@ class Fetcher:
                 return recovered
         from . import providers as _providers
         for provider in _providers.wired_extract_tiers():
-            recovered = self._tier(url, provider)
+            try:
+                recovered = self._tier(url, provider)
+            except Exception as exc:
+                # Each tier is isolated here, deliberately. Letting a raise
+                # propagate looks harmless but is not: fetch() wraps this whole
+                # method in its own try, catches, and then calls _with_fallback
+                # a second time on the way out -- so one malformed provider
+                # response ran the entire chain twice and billed every provider
+                # twice for a single URL. A broken tier should cost one tier.
+                log.warning("extract tier %s failed on %s: %s",
+                            provider.name, url, exc)
+                continue
             if recovered is not None:
                 return recovered
         return doc
@@ -356,9 +367,10 @@ class Fetcher:
     def _tier(self, url: str, provider) -> FetchedDoc | None:
         """Try one registry extract provider, respecting its per-run cap.
 
-        Kept for callers that want a single provider deterministically (the
-        tests use it to assert one tier's behaviour in isolation); the real
-        path is :meth:`_race_extractors`.
+        One tier of the chain in :meth:`_with_fallback`. The cap is claimed
+        before the call, so N concurrent fetch workers cannot each pass a
+        check against a cap of 1, and a provider that declines still costs its
+        slot -- which is what its own billing will say too.
         """
         if not self._claim_paid(provider.name):
             return None

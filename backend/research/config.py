@@ -241,15 +241,6 @@ def firecrawl_max_per_run() -> int:
     return provider_max_per_run("firecrawl")
 
 
-def extract_tier_order() -> str:
-    """Fallback order for unreadable pages, as configured.
-
-    Read here so the env-only policy knob sits with the other env knobs; the
-    authoritative list still lives in providers.py, which owns the defaults.
-    """
-    return (os.environ.get("EXTRACT_TIER_ORDER") or "").strip()
-
-
 def search_fanout() -> bool:
     """Ask every wired open-web engine each general query, concurrently.
 
