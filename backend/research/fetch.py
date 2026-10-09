@@ -25,7 +25,7 @@ import re
 import threading
 import time
 import xml.etree.ElementTree as ET
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from urllib.parse import urljoin, urlparse, unquote
 from urllib.robotparser import RobotFileParser
@@ -95,33 +95,6 @@ _NOISE_TAGS = (
 )
 
 _robots_cache: dict[str, RobotFileParser | None] = {}
-
-
-# One shared pool for every extractor call in the process.
-#
-# Racing the extractors inside Fetcher.fetch means the race happens on a thread
-# that is itself one of fetch_many's workers. Giving each failed URL its own
-# inner pool would multiply threads by (fetch workers x providers) for no gain;
-# the providers are all outbound HTTP calls that spend their time blocked in
-# the kernel, so a small shared pool serves them all.
-_extract_pool_lock = threading.Lock()
-_extract_executor: ThreadPoolExecutor | None = None
-
-
-def _extract_pool(size: int) -> ThreadPoolExecutor:
-    """The shared extractor pool, created on first use.
-
-    Sized generously rather than to ``size`` exactly. The pool is created once
-    and never resized, so a size-to-fit pool would be stuck at whatever the
-    first fetch happened to need, and a later race with more providers wired
-    would queue behind itself -- quietly turning the race back into a queue.
-    """
-    global _extract_executor
-    with _extract_pool_lock:
-        if _extract_executor is None:
-            _extract_executor = ThreadPoolExecutor(
-                max_workers=max(8, size), thread_name_prefix="extract")
-        return _extract_executor
 
 
 @dataclass
@@ -320,23 +293,25 @@ class Fetcher:
         return self._with_fallback(url, doc)
 
     def _with_fallback(self, url: str, doc: FetchedDoc) -> FetchedDoc:
-        """Recover a failed fetch: open-access copy first, then all providers.
+        """Recover a failed fetch: open-access copy first, then the tier chain.
 
-        The extractors are raced, not ranked. A chain's recovery rate is capped
-        by whichever single provider is best at this particular page, and every
-        tier it walks through before reaching that one is time the run does not
-        get back; racing makes the ceiling the union of all of them and costs
-        one fetch's latency instead of five.
+        The chain is registry-driven (``providers.extract_tiers``), ordered
+        cheapest-and-most-likely first, and stops at the first provider that
+        answers -- so a recovered page costs one provider call rather than one
+        per provider. Override the order with EXTRACT_TIER_ORDER.
 
-        That is a deliberate trade: every failed URL now bills all wired
-        providers rather than stopping at the first that works. The per-run
-        caps in the registry are what keep that bounded.
+        The trade this makes is latency: worst case is the *sum* of each
+        provider's timeout on a page that every one of them fails to read. That
+        is the reason a hedge (launch the next provider if the current one has
+        not answered within a few seconds) would be worth considering, but it
+        is only worth it if providers actually hang rather than fail fast.
 
-        Robots-blocked URLs never reach here, so every extractor stays within
-        what the site already allows us to read. Note that a provider rendering
-        the page in its own browser can technically fetch pages robots.txt
-        disallows; that is a policy choice to make deliberately, not a
-        guarantee this method can give.
+        Robots-blocked URLs never reach here, so every tier stays within what
+        the site already allows us to read. Note that a provider rendering the
+        page in its own browser can technically fetch pages robots.txt
+        disallows; the ordering keeps those last, and a run can drop them
+        entirely with EXTRACT_TIER_ORDER, but that is a policy choice to make
+        deliberately rather than a guarantee.
         """
         if doc.status != FAILED:
             return doc
@@ -349,80 +324,12 @@ class Fetcher:
             recovered = self._fetch_copy(url, oa_url)
             if recovered is not None:
                 return recovered
-        recovered = self._race_extractors(url)
-        if recovered is not None:
-            return recovered
-        return doc
-
-    def _race_extractors(self, url: str) -> FetchedDoc | None:
-        """Ask every wired extractor at once; take the first that answers.
-
-        Caps are claimed up front and atomically, so N concurrent fetch workers
-        cannot each pass a check against a cap of 1. Claiming before the call
-        is also the honest accounting: a provider that fails was still billed.
-
-        Losers are abandoned rather than cancelled. A thread already inside
-        ``requests.get`` cannot be interrupted -- asyncio.wait_for cannot
-        cancel a to_thread future for the same reason -- so the result is
-        dropped on the floor and the thread winds itself up. The shared pool
-        means these threads are reused rather than piling up per failed URL.
-        """
         from . import providers as _providers
-
-        candidates = [p for p in _providers.wired_extract_providers()
-                      if self._claim_paid(p.name)]
-        if not candidates:
-            return None
-
-        pool = _extract_pool(len(candidates))
-        futures = {}
-        for provider in candidates:
-            futures[pool.submit(provider.run_extract, url)] = provider
-
-        best: FetchedDoc | None = None
-        best_words = 0
-        deadline: float | None = None
-        pending = set(futures)
-        while pending:
-            if deadline is None:
-                timeout = config.fetch_timeout_s()
-            else:
-                timeout = max(0.0, deadline - time.monotonic())
-            done, pending = wait(pending, timeout=timeout,
-                                 return_when=FIRST_COMPLETED)
-            if not done:
-                if deadline is None:
-                    log.warning("extractors gave up on %s after %.0fs",
-                                url, config.fetch_timeout_s())
-                break
-            for future in done:
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    log.debug("%s raised on %s: %s",
-                              futures[future].name, url, exc)
-                    continue
-                if not result:
-                    continue
-                title, text = result
-                doc = self._external_doc(url, title, text,
-                                         futures[future].method_name)
-                if doc is None:
-                    continue
-                words = len(doc.text.split())
-                if words > best_words:
-                    best, best_words = doc, words
-            if best is not None and deadline is None:
-                # First answer in. Its siblings are already in flight and
-                # already billed, so holding the result for a moment to see
-                # whether one of them has more of the page costs latency and
-                # nothing else. Taking the first arrival outright is how a
-                # 39-word consent wall wins the race against the real article.
-                deadline = time.monotonic() + config.extract_grace_s()
-
-        for future in pending:
-            future.cancel()
-        return best
+        for provider in _providers.wired_extract_tiers():
+            recovered = self._tier(url, provider)
+            if recovered is not None:
+                return recovered
+        return doc
 
     def _fetch_copy(self, url: str, target: str) -> FetchedDoc | None:
         """Fetch an open-access copy of the original URL. None unless readable."""

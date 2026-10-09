@@ -90,6 +90,8 @@ def _scrub_credentials(monkeypatch):
         # literal list above has already covered the registry by hand.
         pass
     monkeypatch.delenv("SEARCH_FANOUT", raising=False)
+    monkeypatch.delenv("EXTRACT_TIER_ORDER", raising=False)
+    monkeypatch.delenv("EXTRACT_GRACE_S", raising=False)
 
 
 @pytest.fixture(autouse=True)

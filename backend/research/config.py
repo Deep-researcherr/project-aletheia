@@ -241,15 +241,13 @@ def firecrawl_max_per_run() -> int:
     return provider_max_per_run("firecrawl")
 
 
-def extract_grace_s() -> float:
-    """How long to keep listening for a better answer once one extractor wins.
+def extract_tier_order() -> str:
+    """Fallback order for unreadable pages, as configured.
 
-    Every provider in the race is called and billed regardless of who answers
-    first, so holding the first result briefly to see whether a sibling returns
-    more of the page costs only wall-clock. Set to 0 to take the first answer
-    outright, which is fastest and sometimes noticeably thinner.
+    Read here so the env-only policy knob sits with the other env knobs; the
+    authoritative list still lives in providers.py, which owns the defaults.
     """
-    return _float("EXTRACT_GRACE_S", 2.5, 0.0, 30.0)
+    return (os.environ.get("EXTRACT_TIER_ORDER") or "").strip()
 
 
 def search_fanout() -> bool:

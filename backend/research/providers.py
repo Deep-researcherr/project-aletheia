@@ -49,6 +49,22 @@ EXTRACT = "extract"
 # query.
 GENERAL_SOURCES = ("web",)
 
+# Default fallback order for unreadable pages.
+#
+# Tried one at a time, stopping at the first that answers, so a run pays for one
+# provider per recovered page rather than for all of them. Ordered by how
+# likely a provider is to succeed and then by cost:
+#
+#   jina, tinyfish   cheapest, and their markdown arrives ready for the chunker
+#   tavily           reliable paid extraction
+#   firecrawl        reliable paid extraction, smaller allowance
+#   scrapingbee      last: the most expensive per call (~5 credits to render)
+#                    and the only one that executes JavaScript, so it earns its
+#                    place by being the sole thing that can read a JS-only page
+#
+# Override with EXTRACT_TIER_ORDER to reorder without a code change.
+DEFAULT_EXTRACT_ORDER = ("jina", "tinyfish", "tavily", "firecrawl", "scrapingbee")
+
 
 def _timeout(default: float = 45.0) -> float:
     """Per-call ceiling, from FETCH_TIMEOUT_S when it is set sensibly."""
@@ -615,18 +631,51 @@ def wired_general_sources() -> list[str]:
     return out
 
 
-def wired_extract_providers() -> list[Provider]:
-    """Every extract provider that could run, unordered.
+def extract_tiers() -> list[Provider]:
+    """Extract providers in fallback order, honouring EXTRACT_TIER_ORDER.
 
-    There is deliberately no fallback *order*. A tiered chain spends the run's
-    time walking providers that have already declined, and its hit rate is
-    bounded by the best single provider rather than by the union of all of
-    them. The caller races them instead; see Fetcher._race_extractors.
-
-    Kept cheap -- no I/O, just key presence -- because it runs per failed
-    fetch.
+    Names in the env var that are not extract providers are ignored, and any
+    extract provider the env var omits is appended in registry order -- so a
+    typo degrades to "use the default order", never to "silently stop falling
+    back".
     """
-    return [p for p in _REGISTRY if p.role == EXTRACT and p.wired]
+    by_name = {p.name: p for p in _REGISTRY if p.role == EXTRACT}
+    raw = (os.environ.get("EXTRACT_TIER_ORDER") or "").strip()
+    ordered: list[Provider] = []
+    if raw:
+        for name in (part.strip().lower() for part in raw.split(",")):
+            provider = by_name.get(name)
+            if provider and provider not in ordered:
+                ordered.append(provider)
+        missing = [p for p in by_name.values() if p not in ordered]
+        log.info("EXTRACT_TIER_ORDER ignored unknown names; appended %s",
+                 ",".join(p.name for p in missing) or "nothing")
+        ordered.extend(missing)
+        return ordered
+    return [by_name[name] for name in DEFAULT_EXTRACT_ORDER if name in by_name]
+
+
+def extract_tier_order() -> list[str]:
+    return [p.name for p in extract_tiers()]
+
+
+def wired_extract_tiers() -> list[Provider]:
+    """Only the tiers that could actually run, in order.
+
+    Called per failed fetch, so it stays cheap: no I/O, just key presence.
+    """
+    return [p for p in extract_tiers() if p.wired]
+
+
+def wired_extract_providers() -> list[Provider]:
+    """Every usable extract provider, unordered.
+
+    For callers that genuinely want all of them (the run report's recovery
+    breakdown, diagnostics). The fetch path uses :func:`wired_extract_tiers`,
+    which is ordered, because a chain that stops at the first success is what
+    keeps a run from paying four times for one page.
+    """
+    return [p for p in extract_tiers() if p.wired]
 
 
 def wired_search_providers() -> dict[str, Provider]:
