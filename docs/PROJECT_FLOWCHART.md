@@ -142,3 +142,54 @@ not just what it does.
 | 7. Contradiction check | `backend/research/extract.py` (find_conflicts), `graph.py` |
 | 8. Synthesis | `backend/research/report.py`, `output_pool.py`, `markdown_html.py` |
 | 9. Deliver | `backend/research/researcher.py`, `runlog.py`, `pdf_report.py`, `backend/main.py`, `frontend/` |
+
+## What runs concurrently, and what must not
+
+The pipeline is not uniformly sequential. Three loops issue independent model
+calls, and one loop deliberately does not:
+
+| Loop | Concurrency | Why it is safe |
+| --- | --- | --- |
+| Extraction batches (`extract.py`) | `LLM_PARALLELISM` at a time | Each batch sends its own passages and validates the reply against exactly those |
+| Per-source synthesis (`extract.py`) | `LLM_PARALLELISM` at a time | One source per call, each writing to its own key |
+| Report sections (`report.py`) | **serial, on purpose** | Later sections are grounded in the sections already written, via `OutputMemoryPool`. Parallelising this would remove the feature, not just the wait |
+| Planner, gap check, contradiction check | serial | Single calls whose output feeds the next decision |
+
+Two invariants make the parallel path safe, and both are load-bearing:
+
+- **Results are reassembled in submission order, never completion order.**
+  `evidence_id` is assigned by `enumerate()` after `dedupe()`, so collecting
+  calls as they finish would renumber every citation between two runs of the
+  same question. `[3]` in one run would be `[7]` in the next.
+- **`CallBudget.take()` is atomic.** The check and the increment happen under
+  one lock. Without it, threads that both read `remaining = 1` both proceed,
+  and the run overspends its own ceiling. A measured replica of the unlocked
+  version handed out 27 calls against a budget of 10.
+
+The throttle (`THROTTLE_LLM_MAX_CONCURRENT`, `THROTTLE_LLM_PER_MINUTE`) is the
+real governor on what a provider sees; `LLM_PARALLELISM` is how many of those
+calls a stage has in flight. Measured on a 40-batch extraction stage: 12/min at
+concurrency 1 took 195s, 30/min at concurrency 4 took 78s.
+
+## Progress reporting
+
+`retrieve` and `analyse` are the two longest stages and used to emit nothing
+until they finished, so the UI showed a frozen step for minutes. Both now write
+progress from inside the stage through LangGraph's `get_stream_writer()`,
+delivered as a `custom` stream alongside the usual node updates: a real line per
+document as each fetch completes, and per-phase lines for ranking, extraction
+and source assessment.
+
+Progress is cosmetic by construction. `_progress()` is a no-op when no stream is
+attached, swallows writer failures, and the per-document fetch callback is
+optional — a fetcher that predates it still retrieves documents rather than
+failing the stage.
+
+## Budgets and ceilings
+
+| Knob | Default | Enforced |
+| --- | --- | --- |
+| `RESEARCH_LLM_BUDGET` | `25 + 60/rounds` | Per call, atomically. A wave clipped mid-flight still reports the truncation rather than passing off a partial pass as complete |
+| `RESEARCH_TIME_BUDGET_S` | 600 | Between stages. The run stops and says why, keeping every document and chunk already retrieved |
+| `RESEARCH_FETCH_BUDGET` | 100 | Per run, race-free across fetch worker threads |
+| `LOG_LEVEL` | `INFO` | At startup; without it the pipeline's progress lines were emitted into a void |
