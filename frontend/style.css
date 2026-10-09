@@ -61,11 +61,77 @@ body {
 }
 
 /* Floating settings (3-dot) menu. Fixed so it stays put during scroll. */
+/* Top-right bar: the wordmark and the settings menu share one fixed strip, so
+   the brand sits in the corner without disturbing the menu's own hit area. */
 .settings {
     position: fixed;
-    top: 12px;
-    right: 10px;
+    top: 14px;
+    right: 16px;
     z-index: 100;
+
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+/* Aletheia wordmark. The mark is a compass-drawn circle around a check whose
+   two arms meet at deliberate angles (58 degrees down, 38 degrees up) -- the
+   geometry is the point, and it is what keeps the tick optically centred
+   rather than merely mathematically centred. */
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+
+    text-decoration: none;
+    color: inherit;
+
+    padding: 6px 12px 6px 8px;
+    border-radius: 12px;
+
+    transition: background 0.18s ease;
+}
+
+.brand:hover {
+    background: rgba(255, 255, 255, 0.045);
+}
+
+.brand-mark {
+    display: block;
+    width: 30px;
+    height: 30px;
+    flex: none;
+    color: #D97756;
+}
+
+.brand-mark svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.brand-name {
+    font-family: "AnthropicSerif", Georgia, "Times New Roman", serif;
+    font-size: 25px;
+    font-weight: 400;
+    letter-spacing: 0.012em;
+    line-height: 1;
+    color: var(--ink);
+}
+
+:root[data-theme="light"] .brand:hover {
+    background: rgba(0, 0, 0, 0.035);
+}
+
+@media (max-width: 560px) {
+    .brand-name {
+        font-size: 20px;
+    }
+
+    .brand-mark {
+        width: 25px;
+        height: 25px;
+    }
 }
 
 .settings-dots {
