@@ -241,13 +241,34 @@ def firecrawl_max_per_run() -> int:
     return provider_max_per_run("firecrawl")
 
 
-def extract_tier_order() -> str:
-    """Fallback order for unreadable pages, as configured.
+def extract_grace_s() -> float:
+    """How long to keep listening for a better answer once one extractor wins.
 
-    Read here so the env-only policy knob sits with the other env knobs; the
-    authoritative list still lives in providers.py, which owns the defaults.
+    Every provider in the race is called and billed regardless of who answers
+    first, so holding the first result briefly to see whether a sibling returns
+    more of the page costs only wall-clock. Set to 0 to take the first answer
+    outright, which is fastest and sometimes noticeably thinner.
     """
-    return (os.environ.get("EXTRACT_TIER_ORDER") or "").strip()
+    return _float("EXTRACT_GRACE_S", 2.5, 0.0, 30.0)
+
+
+def search_fanout() -> bool:
+    """Ask every wired open-web engine each general query, concurrently.
+
+    Default on. The engines rank differently -- keyword, semantic, independent
+    index -- so the union of their answers is more evidence than the best
+    single one, and the collector dedupes by URL so the overlap costs nothing
+    but a fetch attempt.
+
+    Turn it off to go back to one engine per planned query, which is a third
+    of the search spend and a thinner report.
+    """
+    return _bool("SEARCH_FANOUT", True)
+
+
+def search_fanout_max_engines() -> int:
+    """Ceiling on engines per general query. 0 means no ceiling."""
+    return _int("SEARCH_FANOUT_MAX_ENGINES", 0, 0, 12)
 
 
 def fetch_max_chars() -> int:

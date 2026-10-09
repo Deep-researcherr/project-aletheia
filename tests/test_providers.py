@@ -8,6 +8,7 @@ provider which raises cannot take a run down -- rather than pinning any single
 provider's request shape, which would make adding the next one a test rewrite.
 """
 from pathlib import Path
+import time
 
 import pytest
 
@@ -92,7 +93,7 @@ def test_provider_without_a_key_is_absent_not_broken(monkeypatch):
     provider = providers.search_providers()["exa"]
     assert provider.run_search("anything", 3) == ([], {})
     assert providers.wired_search_providers() == {}
-    assert providers.wired_extract_tiers() == []
+    assert providers.wired_extract_providers() == []
 
 
 def test_a_provider_can_be_switched_off_without_deleting_its_key(monkeypatch):
@@ -118,35 +119,50 @@ def test_a_raising_provider_cannot_take_the_run_down(monkeypatch):
     assert provider.run_search("q", 3) == ([], {})
 
 
-# --- fallback ordering ------------------------------------------------------
+# --- no fallback ordering ---------------------------------------------------
 
-def test_default_tier_order_puts_the_free_tiers_first():
-    """Cheapest first is the whole reason the default is what it is: ScrapingBee
-    renders in a browser and costs several credits a call, so it must not be
-    reached while a free tier is unused."""
-    order = providers.extract_tier_order()
-    assert order[0] in ("jina", "tinyfish")
-    assert order.index("scrapingbee") > order.index("tavily"), \
-        "the paid JS-rendering tier should sit after the plain extraction tiers"
-    assert order[-1] in ("firecrawl", "scrapingbee"), \
-        "the most expensive tier should be last"
+def test_extractors_are_not_ordered(monkeypatch):
+    """There is no tier order any more, and there must not grow one back.
 
-
-def test_tier_order_is_configurable(monkeypatch):
-    monkeypatch.setenv("EXTRACT_TIER_ORDER", "firecrawl, tavily")
-    order = providers.extract_tier_order()
-    assert order[:2] == ["firecrawl", "tavily"]
-    assert set(order) == {p.name for p in providers.for_role(providers.EXTRACT)}, \
-        "providers left out of EXTRACT_TIER_ORDER must be appended, not dropped"
+    A ranked chain caps recovery at the best single provider and spends the
+    run's latency walking the ones that have already declined. Racing makes the
+    ceiling the union of all of them.
+    """
+    assert not hasattr(providers, "extract_tiers")
+    assert not hasattr(providers, "extract_tier_order")
+    assert not hasattr(providers, "DEFAULT_EXTRACT_ORDER")
+    for provider in providers.all_providers():
+        assert "order" not in provider.__dict__, \
+            "a provider carrying its own position is a tier order returning"
 
 
-def test_typo_in_tier_order_degrades_rather_than_disabling_the_chain(monkeypatch):
-    """A misspelled provider name must not silently reduce the chain to
-    nothing -- that would look exactly like 'no fallback is configured'."""
-    monkeypatch.setenv("EXTRACT_TIER_ORDER", "jinaa, tavily")
-    order = providers.extract_tier_order()
-    assert "tavily" in order
-    assert len(order) == len(providers.for_role(providers.EXTRACT))
+def test_every_wired_extractor_is_available_to_the_race(monkeypatch):
+    """The race asks all of them, so all of them must be reachable."""
+    for provider in providers.for_role(providers.EXTRACT):
+        monkeypatch.setenv(provider.env, "k")
+    names = {p.name for p in providers.wired_extract_providers()}
+    assert names == {p.name for p in providers.for_role(providers.EXTRACT)}
+
+
+def test_an_unwired_extractor_is_excluded_from_the_race(monkeypatch):
+    monkeypatch.setenv("SCRAPINGBEE_API_KEY", "k")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    names = {p.name for p in providers.wired_extract_providers()}
+    assert "scrapingbee" in names
+    assert "tavily" not in names
+
+
+def test_disabling_one_extractor_keeps_the_others(monkeypatch):
+    """A single switched-off or dead key must not disable the race."""
+    for provider in providers.for_role(providers.EXTRACT):
+        monkeypatch.setenv(provider.env, "k")
+    monkeypatch.setenv("SCRAPINGBEE_ENABLED", "0")
+    providers._note_auth_failure("jina")
+    providers._note_auth_failure("jina")
+    names = {p.name for p in providers.wired_extract_providers()}
+    assert "scrapingbee" not in names, "switched off"
+    assert "jina" not in names, "quarantined"
+    assert {"tavily", "tinyfish", "firecrawl"} <= names
 
 
 # --- per-run caps -----------------------------------------------------------
@@ -200,7 +216,7 @@ def test_two_rejected_keys_pause_a_provider_and_then_it_is_skipped():
     provider = providers.search_providers()["exa"]
     assert not provider.wired
     assert "exa" not in providers.wired_search_providers()
-    assert "exa" not in [p.name for p in providers.wired_extract_tiers()]
+    assert "exa" not in [p.name for p in providers.wired_extract_providers()]
 
 
 def test_a_success_clears_the_quarantine(monkeypatch):
@@ -284,43 +300,148 @@ def _stub_extractors(monkeypatch, **results):
                             raising=False)
 
 
-def test_the_chain_walks_tiers_in_order_until_one_succeeds(walled, monkeypatch):
+def test_every_wired_extractor_is_asked_not_just_the_first(walled, monkeypatch):
+    """The race fires them all, so one declining provider must not stop the
+    others from being tried."""
     from backend.research.fetch import Fetcher
 
-    monkeypatch.setenv("JINA_API_KEY", "k")
-    monkeypatch.setenv("TAVILY_API_KEY", "k")
+    for name in ("JINA", "TINYFISH", "TAVILY", "SCRAPINGBEE", "FIRECRAWL"):
+        monkeypatch.setenv(f"{name}_API_KEY", "k")
     _stub_extractors(monkeypatch, tavily=("T", "recovered body text " * 60))
 
     fetcher = Fetcher(session=walled)
     doc = fetcher.fetch("https://walled.dev/article")
 
     assert doc.status == "full"
-    assert doc.method == "tavily", "an earlier tier must win, not the last one"
-    assert fetcher.paid_used("jina") == 1, "jina was tried and declined"
-    assert fetcher.paid_used("tavily") == 1
-    assert fetcher.paid_used("firecrawl") == 0, "the chain must stop on success"
+    assert doc.method == "tavily"
+    spent = fetcher._paid_used
+    for name in ("jina", "tinyfish", "tavily", "scrapingbee", "firecrawl"):
+        assert spent.get(name) == 1, (
+            f"{name} was not raced; the point is that all of them are asked")
 
 
-def test_a_tier_that_declines_hands_over_to_the_next(walled, monkeypatch):
+def test_the_race_answers_from_whichever_provider_comes_back_first(
+        walled, monkeypatch):
+    """No provider is preferred. Whichever produces usable text first wins."""
+    from backend.research.fetch import Fetcher
+
+    monkeypatch.setenv("JINA_API_KEY", "k")
+    monkeypatch.setenv("SCRAPINGBEE_API_KEY", "k")
+    _stub_extractors(monkeypatch,
+                     jina=("J", "jina body " * 60),
+                     scrapingbee=("S", "js rendered body " * 60))
+
+    fetcher = Fetcher(session=walled)
+    doc = fetcher.fetch("https://walled.dev/article")
+    assert doc.status == "full"
+    assert doc.method in ("jina_reader", "scrapingbee")
+    assert fetcher.paid_used("jina") == 1
+    assert fetcher.paid_used("scrapingbee") == 1
+
+
+def test_a_thin_answer_does_not_win_over_a_richer_sibling(walled, monkeypatch):
+    """The grace window exists for exactly this.
+
+    Racing and taking the first arrival means a provider that answers fast with
+    a consent wall beats one that answers a second later with the whole
+    article. Every provider in the race is billed either way, so listening
+    briefly costs only wall-clock.
+    """
     from backend.research.fetch import Fetcher
 
     monkeypatch.setenv("JINA_API_KEY", "k")
     monkeypatch.setenv("TINYFISH_API_KEY", "k")
-    monkeypatch.setenv("SCRAPINGBEE_API_KEY", "k")
-    _stub_extractors(monkeypatch, scrapingbee=("S", "js rendered body " * 60))
+    monkeypatch.setattr(config, "extract_grace_s", lambda: 3.0)
+
+    def fast_then_thin(url):
+        return ("J", "enable javascript to continue " * 5)
+
+    def slower_but_real(url):
+        time.sleep(0.4)
+        return ("T", "the full article body " * 60)
+
+    for provider in providers.for_role(providers.EXTRACT):
+        call = (slower_but_real if provider.name == "tinyfish" else fast_then_thin)
+        monkeypatch.setattr(provider, "call", call, raising=False)
 
     fetcher = Fetcher(session=walled)
     doc = fetcher.fetch("https://walled.dev/article")
-
-    assert doc.method == "scrapingbee"
-    assert fetcher.paid_used("jina") == 1
-    assert fetcher.paid_used("tinyfish") == 1
-    assert fetcher.paid_used("tavily") == 0
+    assert doc.method == "tinyfish_fetch"
+    assert len(doc.text.split()) > 100
 
 
-def test_a_tier_hitting_its_cap_is_skipped_not_spent(walled, monkeypatch):
-    """The cap is claimed before the call, so a spent tier must cost nothing
-    further and the chain must move on instead of failing the fetch."""
+def test_the_grace_window_is_bounded_by_config(walled, monkeypatch):
+    """A slow provider must not be able to hold the run open indefinitely."""
+    import time as _time
+
+    from backend.research.fetch import Fetcher
+
+    monkeypatch.setenv("JINA_API_KEY", "k")
+    monkeypatch.setenv("TINYFISH_API_KEY", "k")
+    monkeypatch.setattr(config, "extract_grace_s", lambda: 0.2)
+    monkeypatch.setattr(config, "fetch_timeout_s", lambda: 10.0)
+
+    def slow(url):
+        _time.sleep(6)
+        return ("S", "slow but large " * 200)
+
+    for provider in providers.for_role(providers.EXTRACT):
+        # One provider answers immediately and opens the grace window; the
+        # others are still running when it closes.
+        # Bind the name as a default argument: a closure over the loop variable
+        # would be evaluated at call time, by which point every provider would
+        # see the last iteration's name and get the same branch.
+        monkeypatch.setattr(
+            provider, "call",
+            (lambda url, _name=provider.name:
+             ("J", "short answer " * 40) if _name == "jina" else slow(url)),
+            raising=False)
+
+    fetcher = Fetcher(session=walled)
+    start = _time.monotonic()
+    doc = fetcher.fetch("https://walled.dev/article")
+    elapsed = _time.monotonic() - start
+    assert elapsed < 4, f"the race waited {elapsed:.1f}s for stragglers"
+    assert doc.status == "full"
+    assert doc.method == "jina_reader"
+
+
+def test_a_provider_returning_nothing_does_not_beat_one_that_answers(
+        walled, monkeypatch):
+    from backend.research.fetch import Fetcher
+
+    monkeypatch.setenv("JINA_API_KEY", "k")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "k")
+    _stub_extractors(monkeypatch,
+                     jina=None,
+                     firecrawl=("F", "firecrawl body " * 60))
+
+    fetcher = Fetcher(session=walled)
+    doc = fetcher.fetch("https://walled.dev/article")
+    assert doc.method == "firecrawl"
+    assert "firecrawl body" in doc.text
+
+
+def test_thin_text_is_not_accepted_as_a_recovery(walled, monkeypatch):
+    """A provider that answers with a stub must not beat silence: a 3-word
+    'enable javascript' page is worse than an honest failure."""
+    from backend.research.fetch import Fetcher
+
+    monkeypatch.setenv("JINA_API_KEY", "k")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "k")
+    _stub_extractors(monkeypatch,
+                     jina=("J", "please enable javascript"),
+                     firecrawl=("F", "firecrawl body " * 60))
+
+    fetcher = Fetcher(session=walled)
+    doc = fetcher.fetch("https://walled.dev/article")
+    assert doc.method == "firecrawl"
+
+
+def test_an_extractor_hitting_its_cap_is_left_out_of_the_race(walled,
+                                                              monkeypatch):
+    """Caps are claimed before the call, so a spent provider costs nothing
+    further and simply does not enter the race."""
     from backend.research.fetch import Fetcher
 
     monkeypatch.setenv("JINA_API_KEY", "k")
@@ -331,11 +452,24 @@ def test_a_tier_hitting_its_cap_is_skipped_not_spent(walled, monkeypatch):
                      tavily=("T", "tavily body " * 60))
 
     fetcher = Fetcher(session=walled)
-    first = fetcher.fetch("https://walled.dev/a")
-    assert first.method == "jina_reader"
-    second = fetcher.fetch("https://walled.dev/b")
-    assert second.method == "tavily", "a capped tier must not be retried"
-    assert fetcher.paid_used("jina") == 1
+    fetcher.fetch("https://walled.dev/a")
+    first_spend = dict(fetcher._paid_used)
+    fetcher.fetch("https://walled.dev/b")
+
+    assert fetcher.paid_used("jina") == first_spend["jina"] == 1, \
+        "a capped provider must not be charged again"
+    assert fetcher.paid_used("tavily") == 2
+
+
+def test_no_wired_extractor_leaves_the_failure_visible(walled, monkeypatch):
+    """Recovery failing must not be laundered into a success."""
+    from backend.research.fetch import Fetcher
+
+    _stub_extractors(monkeypatch)
+    fetcher = Fetcher(session=walled)
+    doc = fetcher.fetch("https://walled.dev/article")
+    assert doc.status == "failed"
+    assert fetcher._paid_used == {}
 
 
 def test_named_counters_still_reflect_the_registry_spend(walled, monkeypatch):

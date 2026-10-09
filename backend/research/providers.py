@@ -41,13 +41,13 @@ log = logging.getLogger(__name__)
 SEARCH = "search"
 EXTRACT = "extract"
 
-# Default fallback order for unreadable pages.
-#
-# Cheap-and-free first, expensive last: Jina Reader and TinyFish Fetch both have
-# generous daily allowances, while ScrapingBee with render_js costs several
-# credits a call and Firecrawl is the priciest of the five. Overridable with
-# EXTRACT_TIER_ORDER so the policy is data, not code.
-DEFAULT_EXTRACT_ORDER = ("jina", "tinyfish", "tavily", "scrapingbee", "firecrawl")
+# Sources that mean "the open web" and are therefore interchangeable: a query
+# routed to one of these can be asked of all of them at once, and the union is
+# strictly more evidence than any single engine. Sources that name a corpus
+# (scholar, patent, github, arxiv, news) are NOT in here -- fanning a patent
+# query across a news index would throw away the thing that made it a patent
+# query.
+GENERAL_SOURCES = ("web",)
 
 
 def _timeout(default: float = 45.0) -> float:
@@ -593,40 +593,40 @@ def search_providers() -> dict[str, Provider]:
             if p.role == SEARCH and p.source}
 
 
-def extract_tiers() -> list[Provider]:
-    """Extract providers in fallback order, honouring EXTRACT_TIER_ORDER.
+def general_sources() -> tuple[str, ...]:
+    """Every open-web search source, SerpApi first.
 
-    Names in the env var that are not extract providers are ignored, and any
-    extract provider the env var omits is appended in registry order -- so a
-    typo degrades to "use the default order", never to "silently stop falling
-    back".
+    SerpApi leads because its rows carry the most (dates, related questions,
+    answer boxes), and when two engines return the same URL the collector keeps
+    whichever arrives first.
     """
-    by_name = {p.name: p for p in _REGISTRY if p.role == EXTRACT}
-    raw = (os.environ.get("EXTRACT_TIER_ORDER") or "").strip()
-    ordered: list[Provider] = []
-    if raw:
-        for name in (part.strip().lower() for part in raw.split(",")):
-            provider = by_name.get(name)
-            if provider and provider not in ordered:
-                ordered.append(provider)
-        missing = [p for p in by_name.values() if p not in ordered]
-        log.info("EXTRACT_TIER_ORDER ignored unknown names; appended %s",
-                 ",".join(p.name for p in missing) or "nothing")
-        ordered.extend(missing)
-        return ordered
-    return [by_name[name] for name in DEFAULT_EXTRACT_ORDER if name in by_name]
+    return GENERAL_SOURCES + tuple(sorted(search_providers()))
 
 
-def extract_tier_order() -> list[str]:
-    return [p.name for p in extract_tiers()]
+def wired_general_sources() -> list[str]:
+    """The general sources that could actually answer a query right now."""
+    out = []
+    for name in general_sources():
+        if name == "web":
+            if (os.environ.get("SERPAPI_KEY") or "").strip():
+                out.append(name)
+        elif search_providers().get(name, None) and search_providers()[name].wired:
+            out.append(name)
+    return out
 
 
-def wired_extract_tiers() -> list[Provider]:
-    """Only the tiers that could actually run, in order.
+def wired_extract_providers() -> list[Provider]:
+    """Every extract provider that could run, unordered.
 
-    Called per failed fetch, so it stays cheap: no I/O, just key presence.
+    There is deliberately no fallback *order*. A tiered chain spends the run's
+    time walking providers that have already declined, and its hit rate is
+    bounded by the best single provider rather than by the union of all of
+    them. The caller races them instead; see Fetcher._race_extractors.
+
+    Kept cheap -- no I/O, just key presence -- because it runs per failed
+    fetch.
     """
-    return [p for p in extract_tiers() if p.wired]
+    return [p for p in _REGISTRY if p.role == EXTRACT and p.wired]
 
 
 def wired_search_providers() -> dict[str, Provider]:
