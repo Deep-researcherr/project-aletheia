@@ -170,6 +170,28 @@ def test_parallel_extraction_matches_serial_ids(monkeypatch):
     assert serial_notes == parallel_notes
 
 
+@pytest.mark.parametrize("parallelism", [1, 4, 8])
+def test_extraction_is_identical_at_every_parallelism(monkeypatch, parallelism):
+    """Same ids, claims and notes whatever the worker count."""
+    from backend.research import extract as extract_module
+
+    scored = [_scored(i) for i in range(1, 49)]
+    monkeypatch.setattr(extract_module, "ask", _fake_ask)
+    monkeypatch.setattr(extract_module.config, "llm_parallelism",
+                        lambda p=parallelism: p)
+
+    records, notes = extract_module.extract_evidence(
+        scored, "how does the system scale", None, CallBudget(total=200))
+    key = [(r.evidence_id, r.claim, r.chunk_id) for r in records]
+
+    monkeypatch.setattr(extract_module.config, "llm_parallelism", lambda: 1)
+    base_records, base_notes = extract_module.extract_evidence(
+        scored, "how does the system scale", None, CallBudget(total=200))
+
+    assert key == [(r.evidence_id, r.claim, r.chunk_id) for r in base_records]
+    assert notes == base_notes
+
+
 def test_parallel_source_synthesis_covers_every_source(monkeypatch):
     """Every assessable source gets a synthesis, and the keys are stable."""
     from backend.research import extract as extract_module
@@ -190,6 +212,32 @@ def test_parallel_source_synthesis_covers_every_source(monkeypatch):
 
     out = extract_module.synthesise_sources(records, CallBudget(total=50))
     assert set(out) == {f"S{i}" for i in range(1, 9)}
+
+
+def test_budget_truncation_is_identical_serial_and_parallel(monkeypatch):
+    """A clipped wave still says so, at any parallelism.
+
+    Wave-based claiming can end a run with a partial pass; if it did that
+    quietly, a report built from 3 of 8 batches would read as a complete one.
+    """
+    from backend.research import extract as extract_module
+
+    scored = [_scored(i) for i in range(1, 81)]
+    monkeypatch.setattr(extract_module, "ask", _fake_ask)
+
+    seen = {}
+    for parallelism in (1, 4):
+        monkeypatch.setenv("LLM_PARALLELISM", str(parallelism))
+        monkeypatch.setattr(extract_module.config, "llm_parallelism",
+                            lambda p=parallelism: p)
+        _records, notes = extract_module.extract_evidence(
+            scored, "how does it scale", None, CallBudget(total=3))
+        truncations = [n for n in notes if "budget reached" in n]
+        assert len(truncations) == 1, (
+            f"parallelism={parallelism} did not report truncation: {notes}")
+        seen[parallelism] = notes
+
+    assert seen[1] == seen[4]
 
 
 def test_parallel_synthesis_respects_budget(monkeypatch):

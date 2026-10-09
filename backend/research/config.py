@@ -250,6 +250,18 @@ def extract_max_batches() -> int:
     return _int("EXTRACT_MAX_BATCHES", 40, 1, 200)
 
 
+def llm_parallelism() -> int:
+    """Model calls issued concurrently within a stage.
+
+    Extraction batches and per-source synthesis are independent of each other, so
+    they no longer run one after another. This is how many at a time; the
+    throttle (THROTTLE_LLM_MAX_CONCURRENT / _PER_MINUTE) still governs what the
+    provider actually sees, and stays the real limit -- raise this first and
+    lower it if the chain starts leaning on fallbacks.
+    """
+    return _int("LLM_PARALLELISM", 4, 1, 32)
+
+
 def max_evidence_records() -> int:
     """Cap on structured evidence kept for the report."""
     return _int("MAX_EVIDENCE_RECORDS", 400, 4, 2000)
@@ -345,13 +357,24 @@ def throttle_llm() -> bool:
 
 
 def throttle_llm_per_minute() -> float:
-    """Ceiling on model calls per minute. 0 disables pacing."""
-    return _float("THROTTLE_LLM_PER_MINUTE", 12.0, 0.0, 10_000.0)
+    """Ceiling on model calls per minute. 0 disables pacing.
+
+    Each call waits for its own slot, so this sets the floor on how long a
+    stage of N calls takes: N * 60/per_minute seconds. At the old default of 12
+    a 40-batch extraction stage spent 200s asleep before doing any work.
+    """
+    return _float("THROTTLE_LLM_PER_MINUTE", 30.0, 0.0, 10_000.0)
 
 
 def throttle_llm_max_concurrent() -> int:
-    """Model calls in flight at once. 1 serialises across concurrent runs too."""
-    return _int("THROTTLE_LLM_MAX_CONCURRENT", 1, 1, 64)
+    """Model calls in flight at once.
+
+    Was 1, which serialised every stage even though extraction batches and
+    per-source synthesis calls are independent of each other. Extraction and
+    synthesis now issue calls concurrently (see LLM_PARALLELISM), so this has
+    to allow more than one or the pool just queues behind itself.
+    """
+    return _int("THROTTLE_LLM_MAX_CONCURRENT", 4, 1, 64)
 
 
 def throttle_search() -> bool:
