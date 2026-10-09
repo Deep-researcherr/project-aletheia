@@ -61,9 +61,10 @@ body {
 }
 
 /* Floating settings (3-dot) menu. Fixed so it stays put during scroll. */
-/* Top bar: wordmark hard left, settings pinned to the right edge. The brand
-   sits in the normal flow so it aligns with the container's own margin rather
-   than floating in a corner; only the menu needs to be positioned. */
+/* Top bar: wordmark sits hard left in the normal flow, so it aligns with the
+   container's own margin. The settings menu is fixed to the viewport edge
+   rather than the bar's, so it stays at the far right on a wide screen the way
+   it was before the wordmark moved to the left. */
 .topbar {
     position: relative;
 
@@ -78,9 +79,9 @@ body {
 }
 
 .settings {
-    position: absolute;
-    top: 18px;
-    right: 24px;
+    position: fixed;
+    top: 14px;
+    right: 14px;
     z-index: 100;
 }
 
@@ -107,8 +108,8 @@ body {
 
 .brand-mark {
     display: block;
-    width: 34px;
-    height: 34px;
+    width: 22px;
+    height: 22px;
     flex: none;
     color: #EDE9E1;
 }
@@ -121,9 +122,9 @@ body {
 
 .brand-name {
     font-family: "AnthropicSerif", Georgia, "Times New Roman", serif;
-    font-size: 20px;
+    font-size: 26px;
     font-weight: 400;
-    letter-spacing: 0.2em;
+    letter-spacing: 0.24em;
     text-transform: uppercase;
     line-height: 1;
     color: var(--ink);
@@ -139,13 +140,13 @@ body {
 
 @media (max-width: 560px) {
     .brand-name {
-        font-size: 16px;
-        letter-spacing: 0.16em;
+        font-size: 18px;
+        letter-spacing: 0.18em;
     }
 
     .brand-mark {
-        width: 25px;
-        height: 25px;
+        width: 19px;
+        height: 19px;
     }
 
     .topbar {

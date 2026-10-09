@@ -111,8 +111,25 @@ def test_wordmark_is_top_left_and_settings_top_right():
     assert re.search(r"\.topbar \{[^}]*justify-content: space-between;", STYLES, re.S)
     assert not re.search(r"^\.brand \{[^}]*margin: auto;", STYLES, re.M | re.S), \
         "margin:auto on .brand will centre the wordmark again"
+    # The menu must be pinned to the viewport, not to the 1100px bar, or it
+    # drifts inwards on a wide screen instead of sitting at the far right.
+    settings_rule = re.search(r"^\.settings \{[^}]*\}", STYLES, re.M | re.S)
+    assert settings_rule, ".settings rule is missing"
+    assert "position: fixed" in settings_rule.group(0)
     topbar_at = MARKUP.index('<div class="topbar">')
     brand_at = MARKUP.index('class="brand"')
     assert brand_at > topbar_at, "brand must live inside the topbar"
     assert MARKUP.index('class="settings"') > brand_at, \
         "settings must follow the brand in the bar"
+
+
+def test_mark_and_wordmark_sizes():
+    """22px mark, 26px wordmark: the mark reads as a symbol beside the name
+    rather than competing with it, which is the proportion in the artwork."""
+    mark = re.search(r"\.brand-mark \{[^}]*\}", STYLES, re.S).group(0)
+    name = re.search(r"\.brand-name \{[^}]*\}", STYLES, re.S).group(0)
+    assert "width: 22px" in mark and "height: 22px" in mark
+    assert "font-size: 26px" in name
+    assert float(re.search(r"font-size: (\d+)px", name).group(1)) > \
+        float(re.search(r"width: (\d+)px", mark).group(1)), \
+        "the wordmark should be larger than the mark it sits beside"
