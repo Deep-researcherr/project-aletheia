@@ -209,14 +209,45 @@ def fetch_respect_robots() -> bool:
     return _bool("FETCH_RESPECT_ROBOTS", True)
 
 
+def provider_max_per_run(name: str) -> int:
+    """Per-run cap for one extract provider. 0 disables that tier.
+
+    The default lives in the registry (``Provider.cap_default``) rather than
+    here, so adding a provider does not also mean editing the config module:
+    the env var is the override, the registry entry is the default.
+
+    The env var is the provider name uppercased with a ``_MAX_PER_RUN``
+    suffix, which is what TAVILY_MAX_PER_RUN and FIRECRAWL_MAX_PER_RUN already
+    were -- so the two existing variables keep working unchanged and the new
+    providers follow the same shape.
+    """
+    try:
+        from .providers import for_role
+
+        provider = next((p for p in for_role("extract") if p.name == name), None)
+        default = provider.cap_default if provider else 10
+    except Exception:
+        default = 10
+    return _int(f"{name.upper()}_MAX_PER_RUN", default, 0, 500)
+
+
 def tavily_max_per_run() -> int:
     """Paid Tavily fallback pages per research run. 0 disables it."""
-    return _int("TAVILY_MAX_PER_RUN", 10, 0, 200)
+    return provider_max_per_run("tavily")
 
 
 def firecrawl_max_per_run() -> int:
     """Paid Firecrawl fallback pages per research run. 0 disables it."""
-    return _int("FIRECRAWL_MAX_PER_RUN", 4, 0, 200)
+    return provider_max_per_run("firecrawl")
+
+
+def extract_tier_order() -> str:
+    """Fallback order for unreadable pages, as configured.
+
+    Read here so the env-only policy knob sits with the other env knobs; the
+    authoritative list still lives in providers.py, which owns the defaults.
+    """
+    return (os.environ.get("EXTRACT_TIER_ORDER") or "").strip()
 
 
 def fetch_max_chars() -> int:

@@ -50,8 +50,9 @@ MARKUP = (APP.parent / "index.html").read_text()
 
 def test_wordmark_is_present_and_names_the_project():
     assert 'class="brand"' in MARKUP
-    assert "Aletheia" in MARKUP
-    assert "<title>Aletheia</title>" in MARKUP
+    assert "Project&nbsp;Aletheia" in MARKUP, \
+        "the wordmark is 'Project Aletheia', not a bare 'Aletheia'"
+    assert "<title>Project Aletheia</title>" in MARKUP
 
 
 def test_wordmark_uses_the_display_serif():
@@ -61,33 +62,25 @@ def test_wordmark_uses_the_display_serif():
     assert rule, ".brand-name rule is missing"
     assert "AnthropicSerif" in rule.group(0)
     assert "text-transform: uppercase" in rule.group(0), \
-        "the wordmark is set in caps with wide tracking, as in the artwork"
+        "the wordmark is set in caps, as in the artwork"
+    assert "font-weight: 700" in rule.group(0), \
+        "the wordmark is set bold -- it is now the only thing identifying the project"
 
 
-def test_logo_is_inline_svg_so_it_inherits_colour():
-    mark = re.search(r'<span class="brand-mark".*?</span>', MARKUP, re.S)
-    assert mark, "brand mark is missing"
-    assert "<svg" in mark.group(0)
-    assert 'stroke="currentColor"' in mark.group(0)
-    assert "<img" not in mark.group(0), "an <img> cannot inherit theme colour"
+def test_header_carries_no_logo_mark():
+    """The header is text only.
 
-
-def test_mark_geometry_matches_the_supplied_artwork():
-    """Open circle, lambda inside, amber point at the centre.
-
-    Traced from the artwork: circle r=36.5 with a ~124 degree gap at the
-    bottom, lambda from (32.6,58.5) to (50,30.5) to (67.4,58.5), and the amber
-    point sitting on the circle's exact centre.
+    The mark lives in the favicon, where it has room to breathe. At header size
+    a circle-and-lambda beside a 32px wordmark read as a competing element
+    rather than a lockup, and the artwork's mark is small relative to its name
+    anyway.
     """
-    mark = re.search(r'<span class="brand-mark".*?</span>', MARKUP, re.S).group(0)
-    assert "M82.2 67.2 A36.5 36.5 0 1 0 17.8 67.2" in mark, \
-        "circle arc (r=36.5, gap at the bottom) has drifted"
-    assert "M32.6 58.5 L50 30.5 L67.4 58.5" in mark, "lambda has drifted"
-    assert 'cx="50" cy="50" r="2.8"' in mark, "amber point is off-centre"
-    assert "#E9B031" in mark, "the amber accent is missing"
-    # Butt caps and a miter join: the artwork's lambda has flat-cut feet and a
-    # crisp apex, which round caps would blunt.
-    assert 'stroke-linecap="butt"' in mark
+    assert "brand-mark" not in MARKUP, "the header logo was removed on purpose"
+    assert not re.search(r"\.brand-mark \{", STYLES), \
+        "the removed .brand-mark rule should be deleted, not left behind"
+    brand = re.search(r'<a class="brand".*?</a>', MARKUP, re.S)
+    assert brand, "brand link is missing"
+    assert "<svg" not in brand.group(0), "the header wordmark is text only"
 
 
 def test_favicon_carries_the_same_mark():
@@ -124,12 +117,14 @@ def test_wordmark_is_top_left_and_settings_top_right():
 
 
 def test_mark_and_wordmark_sizes():
-    """22px mark, 26px wordmark: the mark reads as a symbol beside the name
-    rather than competing with it, which is the proportion in the artwork."""
-    mark = re.search(r"\.brand-mark \{[^}]*\}", STYLES, re.S).group(0)
-    name = re.search(r"\.brand-name \{[^}]*\}", STYLES, re.S).group(0)
-    assert "width: 22px" in mark and "height: 22px" in mark
-    assert "font-size: 26px" in name
-    assert float(re.search(r"font-size: (\d+)px", name).group(1)) > \
-        float(re.search(r"width: (\d+)px", mark).group(1)), \
-        "the wordmark should be larger than the mark it sits beside"
+    """The wordmark is the whole header now, so it is sized like a masthead:
+    32px, bold, with the topbar padding pulled left so it sits near the edge."""
+    name = re.search(r"\.brand-name \{[^}]*\}", STYLES, re.S)
+    assert name, ".brand-name rule is missing"
+    size = float(re.search(r"font-size: (\d+)px", name.group(0)).group(1))
+    assert size >= 30, f"wordmark is only {size}px for a text-only masthead"
+    assert float(re.search(r"font-weight: (\d+)", name.group(0)).group(1)) >= 600, \
+        "the wordmark should be bold"
+    topbar = re.search(r"\.topbar \{[^}]*\}", STYLES, re.S).group(0)
+    assert "padding: 18px 16px 6px;" in topbar, \
+        "topbar padding should hold the wordmark close to the left edge"

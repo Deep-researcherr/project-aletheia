@@ -42,6 +42,25 @@ def clean_env(monkeypatch, request, tmp_path):
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        # Registry providers. Every one of these keys, if left set, lets an
+        # offline test make a real billed call: the extract tiers run inside
+        # Fetcher._with_fallback, so any test that fetches a failing URL would
+        # reach the network. The registry is the single source of truth for
+        # which variables these are, so scrubbing walks it rather than keeping
+        # a hand-maintained list that goes stale the next time a provider is
+        # added.
+        try:
+            from backend.research.providers import all_providers
+
+            for provider in all_providers():
+                monkeypatch.delenv(provider.env, raising=False)
+                monkeypatch.delenv(f"{provider.name.upper()}_ENABLED", raising=False)
+        except Exception:
+            # Best effort: never let an import problem stop the suite running.
+            for name in ("EXA_API_KEY", "JINA_API_KEY",
+                         "TINYFISH_API_KEY", "SCRAPINGBEE_API_KEY"):
+                monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv("EXTRACT_TIER_ORDER", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     # Mock mode is opt-in; an ambient LLM_MOCK/SEARCH_MOCK would silently turn
     # real requests into canned data and make a run look like it passed.

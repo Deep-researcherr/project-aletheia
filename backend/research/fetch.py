@@ -142,13 +142,29 @@ class Fetcher:
                                      "Accept-Language": "en;q=0.9"})
         self.budget = config.total_fetch_budget()
         self.fetched = 0
-        self.tavily_used = 0          # paid fallback calls, per research run
-        self.firecrawl_used = 0
+        # Per-run spend per extract provider. A dict rather than one attribute
+        # per provider because the tier list is registry-driven: a new provider
+        # has to be describable here without touching this class.
+        self._paid_used: dict[str, int] = {}
         # fetch_many runs this fetcher across worker threads; every budget
         # check-and-increment must be atomic, or parallel workers both pass
         # a cap of 1 and overspend the run (double Tavily calls, fetch
         # budget overshoot).
         self._counter_lock = threading.Lock()
+
+    # Kept as named counters because they are read in the run report and in
+    # tests; the storage is the dict above. Read-only: spend happens through
+    # _claim_paid, which is the only place that may increment.
+    @property
+    def tavily_used(self) -> int:
+        return self._paid_used.get("tavily", 0)
+
+    @property
+    def firecrawl_used(self) -> int:
+        return self._paid_used.get("firecrawl", 0)
+
+    def paid_used(self, name: str) -> int:
+        return self._paid_used.get(name, 0)
 
     # -- budget ------------------------------------------------------------
     def exhausted(self) -> bool:
@@ -164,16 +180,17 @@ class Fetcher:
             return True
 
     def _claim_paid(self, service: str) -> bool:
-        """Atomically reserve one paid fallback call within its per-run cap."""
+        """Atomically reserve one fallback call within that provider's per-run cap.
+
+        Generic over the provider name: the cap comes from the registry, so a
+        new extract tier is budgeted the same way the two existing ones are,
+        with no branch to add here and no way to forget the lock.
+        """
         with self._counter_lock:
-            if service == "tavily":
-                if self.tavily_used >= config.tavily_max_per_run():
-                    return False
-                self.tavily_used += 1
-                return True
-            if self.firecrawl_used >= config.firecrawl_max_per_run():
+            spent = self._paid_used.get(service, 0)
+            if spent >= config.provider_max_per_run(service):
                 return False
-            self.firecrawl_used += 1
+            self._paid_used[service] = spent + 1
             return True
 
     # -- robots ------------------------------------------------------------
@@ -276,9 +293,18 @@ class Fetcher:
         return self._with_fallback(url, doc)
 
     def _with_fallback(self, url: str, doc: FetchedDoc) -> FetchedDoc:
-        """Recover a failed fetch, cheapest first: open-access copy, Tavily,
-        Firecrawl. Robots-blocked URLs never reach here, so every tier stays
-        within what the site already allows us to read.
+        """Recover a failed fetch: open-access copy first, then the tier chain.
+
+        The chain is registry-driven (``providers.extract_tiers``), ordered
+        cheapest-first, so a new extraction API joins it by being registered --
+        there is no second list here to keep in step.
+
+        Robots-blocked URLs never reach here, so every tier stays within what
+        the site already allows us to read. Note that a provider rendering the
+        page in its own browser can technically fetch pages robots.txt
+        disallows; the ordering keeps those last, and a run can drop them
+        entirely with EXTRACT_TIER_ORDER, but that is a policy choice to make
+        deliberately rather than a guarantee.
         """
         if doc.status != FAILED:
             return doc
@@ -291,12 +317,11 @@ class Fetcher:
             recovered = self._fetch_copy(url, oa_url)
             if recovered is not None:
                 return recovered
-        recovered = self._paid_fallback(url, "tavily")
-        if recovered is not None:
-            return recovered
-        recovered = self._paid_fallback(url, "firecrawl")
-        if recovered is not None:
-            return recovered
+        from . import providers as _providers
+        for provider in _providers.wired_extract_tiers():
+            recovered = self._tier(url, provider)
+            if recovered is not None:
+                return recovered
         return doc
 
     def _fetch_copy(self, url: str, target: str) -> FetchedDoc | None:
@@ -321,27 +346,21 @@ class Fetcher:
             log.debug("open-access copy failed for %s: %s", url, exc)
         return None
 
-    def _paid_fallback(self, url: str, service: str) -> FetchedDoc | None:
-        """One paid extraction attempt, respecting keys and per-run caps."""
-        import os
-        if service == "tavily":
-            if not (os.environ.get("TAVILY_API_KEY") or "").strip():
-                return None
-            if not self._claim_paid("tavily"):
-                return None
-            from .webextract import tavily_extract
-            result = tavily_extract(url)
-        else:
-            if not (os.environ.get("FIRECRAWL_API_KEY") or "").strip():
-                return None
-            if not self._claim_paid("firecrawl"):
-                return None
-            from .webextract import firecrawl_scrape
-            result = firecrawl_scrape(url)
+    def _tier(self, url: str, provider) -> FetchedDoc | None:
+        """Try one registry extract tier, respecting its per-run cap.
+
+        The cap is claimed before the call, not after, so N concurrent workers
+        cannot each pass a check against a cap of 1 -- the reservation is the
+        spend, and a failed call still consumed it, which is what the
+        provider's own billing will say too.
+        """
+        if not self._claim_paid(provider.name):
+            return None
+        result = provider.run_extract(url)
         if not result:
             return None
         title, text = result
-        return self._external_doc(url, title, text, service)
+        return self._external_doc(url, title, text, provider.method_name)
 
     @staticmethod
     def _external_doc(url: str, title: str, text: str, method: str) -> FetchedDoc | None:

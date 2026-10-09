@@ -111,10 +111,63 @@ def _cached_run(source: str, query: str, n: int, params: dict) -> dict:
 
 
 def _item(title, url, snippet, date, kind, query, extra=None):
-    row = {"title": title or "", "url": url, "snippet": snippet or "", "date": date, "type": kind, "query": query}
-    if extra:
-        row.update(extra)
-    return row
+    """Normalized result row.
+
+    Delegates to providers.make_item so the registry and the SerpApi path
+    cannot drift into two subtly different row shapes -- the collector, the
+    relevance ranker and the PDF all read these keys positionally.
+    """
+    from .providers import make_item
+    return make_item(title, url, snippet, date, kind, query, extra)
+
+
+def _cached_provider_search(source: str, query: str, n: int,
+                            provider) -> tuple[list[dict], dict]:
+    """Run a registry search provider through the same disk cache as SerpApi.
+
+    Provider responses are billed per call, and a research run re-issues the
+    same query whenever the planner is re-run, so caching is what stops a
+    repeat run from paying twice for identical work. Cache failures are
+    non-fatal in both directions: an unreadable file falls back to a live call,
+    and an unwritable one just means the next run pays again.
+    """
+    path = _cache_path(source, query, n)
+    if path is not None and path.is_file():
+        try:
+            cached = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            log.warning("%s cache unreadable for %r (%s); calling live",
+                        source, query[:60], type(exc).__name__)
+            cached = None
+        if isinstance(cached, dict) and cached.get("rows") is not None:
+            return cached.get("rows") or [], cached.get("meta") or {}
+
+    rows, meta = provider.run_search(query, n)
+
+    if path is not None and rows:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"rows": rows, "meta": meta}))
+            os.replace(tmp, path)
+        except OSError as exc:
+            log.warning("%s cache write failed for %r: %s", source, query[:60], exc)
+    return rows, meta
+
+
+def _registry_search(source: str, query: str, n: int):
+    """(rows, meta) from a registry search provider, or None if it is not one.
+
+    ``None`` means "not a registry source, carry on with the SerpApi engines".
+    A registry source with no API key still returns ([], {}) rather than None,
+    so an unwired source degrades to 'this sub-question found nothing' instead
+    of silently being answered from Google and mislabelled.
+    """
+    from . import providers as _providers
+    provider = _providers.search_providers().get(source)
+    if provider is None:
+        return None
+    return _cached_provider_search(source, query, n, provider)
 
 
 def _blocked_host(url: str, blocked: tuple[str, ...]) -> bool:
@@ -416,6 +469,12 @@ def _http_get_cached(source: str, query: str, n: int,
 
 
 def _run_search(source: str, query: str, n: int = 6) -> tuple[list[dict], dict]:
+    # Registry sources first. Checked before the SerpApi branches so a provider
+    # source can never fall through to a Google engine and come back labelled
+    # as something it is not.
+    registered = _registry_search(source, query, n)
+    if registered is not None:
+        return registered
     if source == "arxiv":
         return _arxiv_search(query, n), {}
     if source == "news":

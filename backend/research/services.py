@@ -294,6 +294,53 @@ def _mock_mode() -> bool:
             or os.environ.get("SEARCH_MOCK") == "1")
 
 
+def _registry_rows() -> list[ServiceStatus]:
+    """One dashboard row per registered provider, built from the registry.
+
+    A provider with both a search and an extract role gets one row, not two:
+    they share a key and a balance, and two rows would imply two accounts.
+
+    These rows report the *per-run cap we impose* rather than a vendor balance.
+    None of the registered providers publish a documented credit-read endpoint,
+    and inventing one by probing an undocumented URL would produce a row that
+    reads "HTTP 404" at the start of every run. Saying what we meter locally
+    and how the vendor meters us is the honest version of the same information.
+    """
+    from . import config
+    from . import providers as registry
+
+    grouped: dict[str, list] = {}
+    order: list[str] = []
+    for provider in registry.for_role(registry.SEARCH) + registry.for_role(registry.EXTRACT):
+        if provider.name not in grouped:
+            grouped[provider.name] = []
+            order.append(provider.name)
+        grouped[provider.name].append(provider)
+
+    rows: list[ServiceStatus] = []
+    for name in order:
+        entries = grouped[name]
+        head = entries[0]
+        extractors = [p for p in entries if p.role == registry.EXTRACT]
+        purpose = "; ".join(dict.fromkeys(p.purpose for p in entries))
+        limits = " · ".join(f"{config.provider_max_per_run(p.name)}/run"
+                            for p in extractors)
+        meter = " · ".join(dict.fromkeys(p.meter for p in entries))
+        paused = registry.quarantine_detail(name)
+        detail = f"key {_key_hint(head.env)} · {meter}"
+        if paused:
+            # Deliberately not buried: a provider the run has stopped using
+            # looks identical to one that was never configured, and the whole
+            # point of this panel is that the difference is visible.
+            detail = f"PAUSED: {paused} · {detail}"
+        rows.append(ServiceStatus(
+            name=head.name, purpose=purpose,
+            configured=head.has_key and not paused,
+            balance="", limit=limits, detail=detail,
+            error=paused))
+    return rows
+
+
 def _rows_from(results: dict) -> list[ServiceStatus]:
     from . import config
 
@@ -315,6 +362,14 @@ def _rows_from(results: dict) -> list[ServiceStatus]:
             detail=((detail + f" · key {_key_hint(env)}") if detail
                     else f"key {_key_hint(env)}"),
             error=data.get("error", "")))
+
+    # Tavily and Firecrawl are already listed above with live balances, so the
+    # registry does not repeat them; only providers the panel cannot probe are
+    # added from it. Compared case-insensitively because the probe table
+    # spells them "Tavily"/"Firecrawl" while the registry uses its canonical
+    # lower-case name.
+    already = {name.lower() for _k, name, _p, _e, _pr in _PROBES}
+    rows.extend(row for row in _registry_rows() if row.name.lower() not in already)
 
     rows.append(_llm_chain_status())
     rows.append(ServiceStatus(
