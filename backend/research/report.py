@@ -23,6 +23,7 @@ import re
 
 from . import config
 from .evidence import (Evidence, QUALITY_ORDER, source_type_label, statistics)
+from .extract import INTEGRITY_PREFIX, integrity_notes
 from .llm import GROUNDING, LLMChainError, ask
 from .output_pool import OutputMemoryPool
 from .relevance import dimensions as question_dimensions
@@ -506,17 +507,33 @@ def partial_banner(status: str, missing: list[str]) -> str:
 
     The exported file has to carry this too: a report saved to disk that omits
     half its sections must not read as finished when reopened later.
+
+    Two different things end a run short, and conflating them misleads: a
+    missing section was never written, whereas an evidence-integrity failure
+    means the written sections rest on less evidence than they appear to. The
+    banner says which one happened rather than claiming sections are absent
+    when they are not.
     """
     if status == "completed":
         return ""
     if status == "failed":
         return ("> **" + STATUS_LABELS["failed"] + "**\n>\n"
                 "> No usable report could be generated for this question.\n")
-    return (
-        "> **" + status_headline(status, missing) + "**\n>\n"
-        "> These planned sections could not be written and are absent from "
-        "this report: " + "; ".join(sorted(set(missing))) + ".\n"
-    )
+
+    integrity = [str(m)[len(INTEGRITY_PREFIX):] for m in missing
+                 if str(m).startswith(INTEGRITY_PREFIX)]
+    sections = [str(m) for m in missing if not str(m).startswith(INTEGRITY_PREFIX)]
+
+    lines = ["> **" + status_headline(status, missing) + "**", ">"]
+    if sections:
+        lines.append("> These planned sections could not be written and are "
+                     "absent from this report: "
+                     + "; ".join(sorted(set(sections))) + ".")
+    if integrity:
+        lines.append("> Every section below was written and cited normally, but "
+                     "the evidence behind them was degraded: "
+                     + "; ".join(sorted(set(integrity))) + ".")
+    return "\n".join(lines) + "\n"
 
 
 def generate_report(question, collector, contradictions,
@@ -749,7 +766,16 @@ def generate_report(question, collector, contradictions,
     # Completion reflects evidence adequacy, not just section assembly: named
     # holes join the missing list so the run reports partial until coverage
     # exists, and the banner exposes each gap instead of hiding it.
-    missing = list(failed_sections) + [h for h in holes if h not in failed_sections]
+    #
+    # Evidence-integrity failures join the same list. Every section can be
+    # written and every citation can resolve while the run has silently lost
+    # most of its extraction batches -- the report would read as complete and
+    # be resting on a fraction of the evidence it appears to summarise.
+    integrity = [str(n) for n in (notes or [])
+                 if str(n).startswith(INTEGRITY_PREFIX)]
+    missing = (list(failed_sections)
+               + [h for h in holes if h not in failed_sections]
+               + [i for i in integrity if i not in failed_sections])
     status = classify_status("x", missing, planned, written)
     if missing:
         # Never silently present a section-less report as a finished one, in the
@@ -758,9 +784,24 @@ def generate_report(question, collector, contradictions,
 
     parts.append(render_references(records, refs))
 
-    if notes:
+    # Ordinary notes stay out of the way in a comment, but anything that
+    # compromised the evidence base is printed where a reader will see it: a
+    # pipeline problem hidden in markup is a pipeline problem nobody reads.
+    advisory = [str(n) for n in (notes or [])
+                if not str(n).startswith(INTEGRITY_PREFIX)]
+    if advisory:
         parts.append("\n<!-- pipeline notes: " +
-                     "; ".join(str(n) for n in notes).replace("--", "") + " -->")
+                     "; ".join(advisory).replace("--", "") + " -->")
+    visible = integrity_notes(notes)
+    if visible:
+        parts.append("")
+        parts.append("### How this run went")
+        parts.append("")
+        parts.append("The following affected the evidence this report rests on:")
+        parts.append("")
+        for item in visible:
+            parts.append(f"- {str(item)[len(INTEGRITY_PREFIX):].capitalize()}")
+        parts.append("")
 
     markdown = "\n".join(parts).strip() + "\n"
     return ReportResult(markdown, status, missing,

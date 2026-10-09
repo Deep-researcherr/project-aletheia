@@ -110,6 +110,18 @@ def plan_batches(scored: list[Scored]) -> list[list[Scored]]:
     return batches[: config.extract_max_batches()]
 
 
+# Marks a note as an evidence-integrity failure rather than an observation.
+# Notes are advisory; anything carrying this prefix must reach the reader, and
+# downgrades the run to PARTIAL, because it means the report is built on less
+# evidence than it appears to be.
+INTEGRITY_PREFIX = "Evidence integrity: "
+
+
+def integrity_notes(notes) -> list[str]:
+    """The subset of notes that mean the evidence base is compromised."""
+    return [n for n in (notes or []) if str(n).startswith(INTEGRITY_PREFIX)]
+
+
 def _run_parallel(items: list, worker, parallelism: int) -> list:
     """Apply ``worker`` across ``items`` concurrently, returning results in ORDER.
 
@@ -195,6 +207,15 @@ def extract_evidence(
         accepted, rejected = _harvest(reply, batch, by_id)
         return accepted, rejected, None
 
+    # Batches that came back with nothing at all. A batch can legitimately
+    # yield no records (the extraction prompt tells the model to skip passages
+    # with nothing useful), but a run where most batches return nothing has not
+    # extracted anything, and saying so is the whole point of this stage. The
+    # counters exist so that case is visible instead of silent.
+    silent_empty = 0
+    failed_batches = 0
+    attempted_batches = 0
+
     index = 0
     while index < len(batches):
         full_wave = batches[index:index + parallelism]
@@ -224,12 +245,26 @@ def extract_evidence(
         )
 
         for (number, batch), (accepted, rejected, error) in zip(numbered, results):
+            attempted_batches += 1
             if error is not None:
+                failed_batches += 1
                 kind, _, detail = error.partition(": ")
                 notes.append(f"extraction batch {number} {kind}: {detail}")
                 continue
             calls += 1
             records.extend(accepted)
+            if not accepted and not rejected:
+                # No records and nothing discarded: the model answered, but
+                # with nothing usable. Previously this produced no note at all,
+                # so a run could lose most of its batches and still be
+                # reported as complete.
+                silent_empty += 1
+                notes.append(
+                    f"extraction batch {number} returned no evidence for "
+                    f"{len(batch)} passage(s) and rejected nothing, so the "
+                    f"model's reply for these passages was unusable")
+                log.warning("extraction batch %d returned nothing usable "
+                            "(%d passages)", number, len(batch))
             if rejected:
                 notes.append(f"extraction batch {number}: discarded {rejected} unverified "
                              f"record(s) whose quote was not present in the passage")
@@ -247,6 +282,20 @@ def extract_evidence(
     records = dedupe(records)
     for position, record in enumerate(records, 1):
         record.evidence_id = f"E{position}"
+
+    # Integrity check. If most extraction batches yielded nothing, the evidence
+    # base is not what a reader would assume it is, and the report must not
+    # claim otherwise. Marked so the report layer can surface it rather than
+    # filing it as an ordinary note.
+    if attempted_batches and silent_empty >= max(1, (attempted_batches + 1) // 2):
+        notes.insert(0, INTEGRITY_PREFIX + (
+            f"evidence extraction returned nothing usable for "
+            f"{silent_empty} of {attempted_batches} passage batches"
+            + (f", and {failed_batches} batch(es) failed outright"
+               if failed_batches else "")
+            + " — the findings below rest on a partial evidence base"))
+        log.error("evidence extraction degraded: %d/%d batches unusable",
+                  silent_empty, attempted_batches)
 
     # Target fidelity: evidence about a related-but-different variant (another
     # release, another architecture class) is capped at moderate and labelled,
