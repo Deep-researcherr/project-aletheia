@@ -60,6 +60,8 @@ def test_wordmark_uses_the_display_serif():
     rule = re.search(r"\.brand-name \{.*?\}", STYLES, re.S)
     assert rule, ".brand-name rule is missing"
     assert "AnthropicSerif" in rule.group(0)
+    assert "text-transform: uppercase" in rule.group(0), \
+        "the wordmark is set in caps with wide tracking, as in the artwork"
 
 
 def test_logo_is_inline_svg_so_it_inherits_colour():
@@ -70,19 +72,47 @@ def test_logo_is_inline_svg_so_it_inherits_colour():
     assert "<img" not in mark.group(0), "an <img> cannot inherit theme colour"
 
 
+def test_mark_geometry_matches_the_supplied_artwork():
+    """Open circle, lambda inside, amber point at the centre.
+
+    Traced from the artwork: circle r=36.5 with a ~124 degree gap at the
+    bottom, lambda from (32.6,58.5) to (50,30.5) to (67.4,58.5), and the amber
+    point sitting on the circle's exact centre.
+    """
+    mark = re.search(r'<span class="brand-mark".*?</span>', MARKUP, re.S).group(0)
+    assert "M82.2 67.2 A36.5 36.5 0 1 0 17.8 67.2" in mark, \
+        "circle arc (r=36.5, gap at the bottom) has drifted"
+    assert "M32.6 58.5 L50 30.5 L67.4 58.5" in mark, "lambda has drifted"
+    assert 'cx="50" cy="50" r="2.8"' in mark, "amber point is off-centre"
+    assert "#E9B031" in mark, "the amber accent is missing"
+    # Butt caps and a miter join: the artwork's lambda has flat-cut feet and a
+    # crisp apex, which round caps would blunt.
+    assert 'stroke-linecap="butt"' in mark
+
+
 def test_favicon_carries_the_same_mark():
     """A mismatched favicon is the first thing anyone sees in a tab."""
     icon = re.search(r'<link rel="icon" href="([^"]+)"', MARKUP).group(1)
     assert "%3Csvg" in icon, "favicon should be an inline SVG"
-    assert "circle" in icon
-    assert "15.5" in icon, "favicon geometry has drifted from the header mark"
+    assert "36.5" in icon, "favicon geometry has drifted from the header mark"
+    assert "32.6 58.5" in icon or "32.6%2058.5" in icon, \
+        "favicon lambda has drifted from the header mark"
+    # Thicker strokes so the mark survives being scaled into a tab.
+    assert "stroke-width='9'" in icon or "stroke-width='4'" in icon
 
 
-def test_wordmark_lives_in_the_top_right_bar():
-    """.settings is the fixed top-right strip; the brand shares it with the
-    menu, so the wordmark cannot end up somewhere else on the page."""
-    assert re.search(r"\.settings \{[^}]*position: fixed;", STYLES, re.S)
-    assert re.search(r"\.settings \{[^}]*display: flex;", STYLES, re.S)
-    settings_at = MARKUP.index('<div class="settings">')
+def test_wordmark_is_top_left_and_settings_top_right():
+    """.topbar is the full-width strip; the brand must not be re-centred.
+
+    A dead legacy `.brand { margin: auto }` rule sat further down this file
+    and silently re-centred the wordmark, because a later rule of equal
+    specificity wins. That is the exact failure this guards against.
+    """
+    assert re.search(r"\.topbar \{[^}]*justify-content: space-between;", STYLES, re.S)
+    assert not re.search(r"^\.brand \{[^}]*margin: auto;", STYLES, re.M | re.S), \
+        "margin:auto on .brand will centre the wordmark again"
+    topbar_at = MARKUP.index('<div class="topbar">')
     brand_at = MARKUP.index('class="brand"')
-    assert brand_at > settings_at, "brand must live inside the settings bar"
+    assert brand_at > topbar_at, "brand must live inside the topbar"
+    assert MARKUP.index('class="settings"') > brand_at, \
+        "settings must follow the brand in the bar"

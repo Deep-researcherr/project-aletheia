@@ -6,25 +6,29 @@
 
     <title>Aletheia</title>
 
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Ccircle cx='20' cy='20' r='15.5' fill='none' stroke='%23D97756' stroke-width='2.3'/%3E%3Cpath d='M11.15 18.85 L15.5 25.8 L28.89 15.33' fill='none' stroke='%23D97756' stroke-width='2.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M82.2 67.2 A36.5 36.5 0 1 0 17.8 67.2' fill='none' stroke='%23E9B031' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M32.6 58.5 L50 30.5 L67.4 58.5' fill='none' stroke='%23E9B031' stroke-width='9' stroke-linecap='butt' stroke-linejoin='miter' stroke-miterlimit='6'/%3E%3C/svg%3E">
 
     <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
-    <div class="settings">
+    <div class="topbar">
         <a class="brand" href="/" aria-label="Aletheia">
             <span class="brand-mark" aria-hidden="true">
-                <svg viewBox="0 0 40 40" fill="none">
-                    <circle cx="20" cy="20" r="15.5" stroke="currentColor" stroke-width="2.3"/>
-                    <path d="M11.15 18.85 L15.5 25.8 L28.89 15.33" stroke="currentColor"
-                          stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round"/>
+                <svg viewBox="0 0 100 100" fill="none">
+                    <path d="M82.2 67.2 A36.5 36.5 0 1 0 17.8 67.2" stroke="currentColor"
+                          stroke-width="1.5" stroke-linecap="round"/>
+                    <path d="M32.6 58.5 L50 30.5 L67.4 58.5" stroke="currentColor"
+                          stroke-width="3.6" stroke-linecap="butt" stroke-linejoin="miter"
+                          stroke-miterlimit="6"/>
+                    <circle cx="50" cy="50" r="2.8" fill="#E9B031" stroke="none"/>
                 </svg>
             </span>
             <span class="brand-name">Aletheia</span>
         </a>
 
+        <div class="settings">
         <button id="settings-button" type="button" class="settings-dots" title="Settings" aria-haspopup="true" aria-expanded="false" aria-controls="settings-menu">
             <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
         </button>
@@ -36,6 +40,7 @@
                     </span>
                     <span class="theme-label">Light mode</span>
                 </button>
+        </div>
         </div>
     </div>
 

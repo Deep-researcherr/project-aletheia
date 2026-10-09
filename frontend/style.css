@@ -61,47 +61,56 @@ body {
 }
 
 /* Floating settings (3-dot) menu. Fixed so it stays put during scroll. */
-/* Top-right bar: the wordmark and the settings menu share one fixed strip, so
-   the brand sits in the corner without disturbing the menu's own hit area. */
-.settings {
-    position: fixed;
-    top: 14px;
-    right: 16px;
-    z-index: 100;
+/* Top bar: wordmark hard left, settings pinned to the right edge. The brand
+   sits in the normal flow so it aligns with the container's own margin rather
+   than floating in a corner; only the menu needs to be positioned. */
+.topbar {
+    position: relative;
+
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 18px 24px 6px;
 
     display: flex;
     align-items: center;
-    gap: 14px;
+    justify-content: space-between;
+    gap: 16px;
 }
 
-/* Aletheia wordmark. The mark is a compass-drawn circle around a check whose
-   two arms meet at deliberate angles (58 degrees down, 38 degrees up) -- the
-   geometry is the point, and it is what keeps the tick optically centred
-   rather than merely mathematically centred. */
+.settings {
+    position: absolute;
+    top: 18px;
+    right: 24px;
+    z-index: 100;
+}
+
+/* Aletheia wordmark: an open compass circle around a lambda, with the amber
+   point at its centre. Geometry traced from the supplied artwork. */
 .brand {
     display: flex;
     align-items: center;
-    gap: 11px;
+    gap: 12px;
 
     text-decoration: none;
     color: inherit;
 
-    padding: 6px 12px 6px 8px;
-    border-radius: 12px;
+    border-radius: 10px;
+    padding: 4px 8px 4px 4px;
+    margin-left: -4px;
 
     transition: background 0.18s ease;
 }
 
 .brand:hover {
-    background: rgba(255, 255, 255, 0.045);
+    background: rgba(255, 255, 255, 0.05);
 }
 
 .brand-mark {
     display: block;
-    width: 30px;
-    height: 30px;
+    width: 34px;
+    height: 34px;
     flex: none;
-    color: #D97756;
+    color: #EDE9E1;
 }
 
 .brand-mark svg {
@@ -112,25 +121,40 @@ body {
 
 .brand-name {
     font-family: "AnthropicSerif", Georgia, "Times New Roman", serif;
-    font-size: 25px;
+    font-size: 20px;
     font-weight: 400;
-    letter-spacing: 0.012em;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
     line-height: 1;
     color: var(--ink);
 }
 
+:root[data-theme="light"] .brand-mark {
+    color: #1A1A1A;
+}
+
 :root[data-theme="light"] .brand:hover {
-    background: rgba(0, 0, 0, 0.035);
+    background: rgba(0, 0, 0, 0.04);
 }
 
 @media (max-width: 560px) {
     .brand-name {
-        font-size: 20px;
+        font-size: 16px;
+        letter-spacing: 0.16em;
     }
 
     .brand-mark {
         width: 25px;
         height: 25px;
+    }
+
+    .topbar {
+        padding: 14px 16px 4px;
+    }
+
+    .settings {
+        top: 14px;
+        right: 16px;
     }
 }
 
@@ -235,50 +259,10 @@ body {
     background: rgba(9, 9, 9, 0.8);
 }
 
-.brand {
-    max-width: 1100px;
-    margin: auto;
-
-    padding: 20px 24px;
-
-    display: flex;
-    align-items: center;
-    gap: 14px;
-}
-
-.brand-minimal {
-    padding: 12px 24px;
-    justify-content: flex-end;
-}
-
-.logo {
-    width: 42px;
-    height: 42px;
-
-    display: grid;
-    place-items: center;
-
-    border-radius: 12px;
-
-    background: #eeeeee;
-    color: #090909;
-
-    font-weight: 800;
-    font-size: 14px;
-}
-
-.brand h1 {
-    margin: 0;
-    font-size: 17px;
-}
-
-.brand p {
-    margin: 3px 0 0;
-
-    color: #777;
-
-    font-size: 13px;
-}
+/* .brand, .logo, .brand-minimal, .brand h1 and .brand p used to live here.
+   They were dead -- nothing rendered them -- and `margin: auto` on the old
+   .brand silently re-centred the real wordmark, because a later rule of equal
+   specificity wins. The live definitions are at the top of this file. */
 
 
 /* Main */
