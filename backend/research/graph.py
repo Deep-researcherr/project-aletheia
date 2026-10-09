@@ -18,6 +18,7 @@ import asyncio
 import logging
 import operator
 import re
+import time
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -86,6 +87,7 @@ class State(TypedDict, total=False):
     fetcher: object                      # Fetcher, so the fetch budget is per run
     evidence_stats: dict
     extracted_sources: dict                    # url -> grade already extracted
+    started_at: float                          # time.monotonic() at run start
     export: dict
 
 
@@ -93,6 +95,44 @@ def _col(state) -> Collector:
     col = Collector()
     col.add([dict(r) for r in state.get("raw", [])])
     return col
+
+
+def _progress(stage: str, **fields) -> None:
+    """Write a progress event from inside a stage, if a stream is attached.
+
+    retrieve and analyse take minutes and used to report nothing until they
+    finished, so the browser showed a frozen step for the whole of it. The
+    writer is absent when a node is called directly (tests, or a graph run with
+    no custom stream), so this stays silent rather than raising.
+    """
+    try:
+        from langgraph.config import get_stream_writer
+        writer = get_stream_writer()
+    except Exception:
+        return
+    if writer is None:
+        return
+    try:
+        writer({"type": "progress", "stage": stage, **fields})
+    except Exception:               # progress must never break a stage
+        log.debug("progress write failed for stage %s", stage, exc_info=True)
+
+
+def _out_of_time(state) -> bool:
+    """True once the run has exceeded its soft wall-clock ceiling.
+
+    RESEARCH_TIME_BUDGET_S used to be defined in config and read by nothing,
+    which is worse than not having it: a knob that silently does nothing reads
+    as a guarantee. Checked at stage boundaries rather than mid-call, so a run
+    always stops between units of work and can say why it stopped.
+    """
+    limit = config.wall_clock_budget_s()
+    if limit <= 0:
+        return False
+    started = state.get("started_at")
+    if started is None:
+        return False
+    return (time.monotonic() - started) > limit
 
 
 def _budget(state) -> CallBudget:
@@ -131,7 +171,7 @@ def planner(state):
 
     update = {"plan": plan, "pending": pending, "round": 1,
               "seen": [f'{p["source"]}|{p["query"]}' for p in pending],
-              "budget": budget}
+              "budget": budget, "started_at": time.monotonic()}
     if notes:
         update["notes"] = notes
     return update
@@ -197,6 +237,31 @@ async def retrieve(state):
     sources = col.list()
     urls = [s["url"] for s in sources if s.get("url")]
 
+    if _out_of_time(state):
+        # Stop between stages, keeping everything already retrieved this run.
+        # Returning the empty chunk list here (rather than fetching nothing and
+        # reporting zero sources) would erase documents an earlier round paid
+        # for, so the accumulated state is passed straight through.
+        notes.append(
+            f"run exceeded its {config.wall_clock_budget_s():.0f}s wall-clock "
+            f"budget; no further sources were fetched this round")
+        log.warning("run exceeded its wall-clock budget; retrieval stopped early")
+        # Chunks already built in earlier rounds are carried over rather than
+        # returned empty: clearing them would discard documents the run already
+        # paid to fetch and make the report thinner for no reason.
+        carried: list = []
+        for _grade, made in (state.get("chunks_by_url") or {}).values():
+            carried.extend(made)
+        return {"documents": list((state.get("documents_by_url") or {}).values()),
+                "chunks": carried, "fetcher": state.get("fetcher"),
+                "retrieval_index": dict(state.get("retrieval_index") or {}),
+                "documents_by_url": dict(state.get("documents_by_url") or {}),
+                "chunks_by_url": dict(state.get("chunks_by_url") or {}),
+                "retrieval_stats": {"enabled": False,
+                                    "note": "run exceeded its wall-clock budget; "
+                                            "no further documents were fetched"},
+                "notes": notes}
+
     # One fetcher per run, held in state, so the fetch budget is per request
     # rather than shared across the whole process.
     fetcher = state.get("fetcher") or Fetcher()
@@ -240,8 +305,28 @@ async def retrieve(state):
         if wiki_docs:
             notes.append(f"wikipedia baseline: {len(wiki_docs)} article(s) pre-loaded")
 
+    _progress("retrieve", done=0, total=len(todo), note="downloading sources")
+    seen_docs = {"n": 0}
+
+    def on_doc_done(doc) -> None:
+        """Real per-document progress, from the fetch worker threads."""
+        seen_docs["n"] += 1
+        _progress("retrieve", done=seen_docs["n"], total=len(todo),
+                  url=doc.url, status=doc.status,
+                  note=f"read {doc.title or doc.url}")
+
     try:
-        fetched = await asyncio.to_thread(fetcher.fetch_many, todo) if todo else []
+        if not todo:
+            fetched = []
+        else:
+            # The progress callback is optional: a fetcher that predates it (or
+            # a stub) must not turn a cosmetic feature into a failed stage.
+            try:
+                fetched = await asyncio.to_thread(
+                    fetcher.fetch_many, todo, on_doc_done)
+            except TypeError:
+                log.debug("fetcher does not accept a progress callback")
+                fetched = await asyncio.to_thread(fetcher.fetch_many, todo)
     except Exception as exc:
         log.warning("retrieval failed: %s", exc)
         return {"documents": [], "chunks": [], "fetcher": fetcher,
@@ -523,6 +608,16 @@ async def analyse(state):
         notes.append(f"skipped {skipped} passage(s) from sources already processed")
 
     budget = _budget(state)
+    if _out_of_time(state):
+        notes.append(
+            f"run exceeded its {config.wall_clock_budget_s():.0f}s wall-clock "
+            f"budget; {len(candidates)} candidate passage(s) were left "
+            f"unanalysed rather than extending the run")
+        log.warning("run exceeded its wall-clock budget; analysis stopped early")
+        return {"extracted": merge([]), "source_synth": {}, "notes": notes}
+
+    _progress("analyse", done=0, total=len(candidates),
+              note=f"ranking {len(candidates)} passages")
     scored = diversify(rank(candidates, question, state.get("plan")))
     # Belt-and-braces: the ranked set must contain only newly discovered
     # sources. Candidates are already fresh, but rank/diversify operate on
@@ -538,9 +633,13 @@ async def analyse(state):
         notes.append("retrieved passages were not relevant enough to extract from")
         return {"extracted": merge([]), "source_synth": {}, "notes": notes}
 
+    _progress("analyse", done=0, total=len(scored),
+              note=f"extracting evidence from {len(scored)} passages")
     records, extraction_notes = await asyncio.to_thread(
         extract_evidence, scored, question, state.get("plan"), budget)
     notes.extend(extraction_notes)
+    _progress("analyse", done=len(scored), total=len(scored),
+              note=f"{len(records)} verified record(s) extracted")
 
     # Remember what was read, and how well, so the next round can skip it.
     tracked = dict(state.get("extracted_sources") or {})
@@ -557,9 +656,14 @@ async def analyse(state):
         done: dict = dict(state.get("source_synth") or {})
         todo = [r for r in records if r.source_id and r.source_id not in done]
         if todo:
+            sources_todo = len({r.source_id for r in todo})
+            _progress("analyse", done=0, total=sources_todo,
+                      note=f"assessing {sources_todo} source(s)")
             fresh_synth = await asyncio.to_thread(synthesise_sources, todo, budget)
             done.update(fresh_synth)
             synth = done
+            _progress("analyse", done=sources_todo, total=sources_todo,
+                      note=f"{len(fresh_synth)} source(s) assessed")
 
     log.info("analysis: %d/%d passages processed (%d already seen) -> %d new "
              "records, %d total", len(scored), len(chunks), skipped,

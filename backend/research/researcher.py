@@ -38,7 +38,16 @@ async def deep_research(question: str, max_rounds: int = 3):
         _record_event(question, event)
         return event
 
-    async for chunk in graph.astream(init, stream_mode="updates"):
+    # "custom" carries progress events written from inside a stage via
+    # get_stream_writer(). retrieve and analyse are the two longest stages and
+    # used to emit nothing until they finished, so the browser sat on a frozen
+    # "Reading pages" for minutes with no idea anything was happening.
+    async for mode, chunk in graph.astream(init, stream_mode=["updates", "custom"]):
+        if mode == "custom":
+            # Already in the run-log event shape; recorded like any other.
+            yield emit(chunk)
+            continue
+
         for node, upd in chunk.items():
             if node == "planner":
                 yield emit({"type": "plan", "data": upd["plan"]})

@@ -7,6 +7,29 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
+import logging as _logging
+
+
+def _configure_logging() -> None:
+    """Send the pipeline's own INFO lines to the terminal.
+
+    Without this the interesting progress lines -- "extraction batch 3: 12
+    passages -> 5 records", "retrieval: 40/62 sources readable" -- are emitted
+    and then dropped, because nothing configures a handler for them. Set
+    LOG_LEVEL=DEBUG for the full trace.
+    """
+    level = os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    _logging.basicConfig(
+        level=getattr(_logging, level, _logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # uvicorn installs its own handlers; leave its format alone.
+    _logging.getLogger("uvicorn.access").setLevel(_logging.WARNING)
+
+
+_configure_logging()
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse

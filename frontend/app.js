@@ -81,7 +81,10 @@ const progSearchDetail = document.getElementById("prog-search-detail");
 const progSearchSources = document.getElementById("prog-search-sources");
 const progReadTitle = document.getElementById("prog-read-title");
 const progReadDetail = document.getElementById("prog-read-detail");
+const progAnalyseTitle = document.getElementById("prog-analyse-title");
+const progAnalyseDetail = document.getElementById("prog-analyse-detail");
 const progGapDetail = document.getElementById("prog-gap-detail");
+const progWriteTitle = document.getElementById("prog-write-title");
 const progWriteDetail = document.getElementById("prog-write-detail");
 
 const ROUND_LABELS = {
@@ -182,6 +185,15 @@ function resetProgress() {
     if (progReadDetail) {
         progReadDetail.textContent = "Waiting for downloads…";
     }
+    if (progAnalyseTitle) {
+        progAnalyseTitle.textContent = "Extracting evidence";
+    }
+    if (progAnalyseDetail) {
+        progAnalyseDetail.textContent = "Waiting for passages…";
+    }
+    if (progWriteTitle) {
+        progWriteTitle.textContent = "Writing the report";
+    }
     if (progWriteDetail) {
         progWriteDetail.textContent = "Waiting for sections…";
     }
@@ -222,6 +234,44 @@ function progressSearch(data) {
         tag.className = "plan-source";
         tag.textContent = data.source;
         progSearchSources.appendChild(tag);
+    }
+}
+
+
+function progressLive(data) {
+    // Mid-stage progress from retrieve/analyse. These two stages take minutes
+    // and used to emit nothing until they finished, so the browser showed a
+    // frozen step for the whole of it with no sign anything was happening.
+    if (!data) {
+        return;
+    }
+    const stage = data.stage;
+    const note = data.note || "";
+    const done = Number(data.done || 0);
+    const total = Number(data.total || 0);
+
+    if (stage === "retrieve") {
+        setStepState("search", "done");
+        setStepState("read", "active");
+        if (progReadTitle && total) {
+            progReadTitle.textContent = `Reading ${done} of ${total}`;
+        }
+        if (progReadDetail && note) {
+            progReadDetail.textContent = note;
+        }
+    }
+
+    if (stage === "analyse") {
+        setStepState("read", "done");
+        setStepState("analyse", "active");
+        if (progAnalyseTitle && total) {
+            progAnalyseTitle.textContent = done === 0
+                ? `Analysing ${total} passages`
+                : `Analysed ${done} of ${total}`;
+        }
+        if (progAnalyseDetail && note) {
+            progAnalyseDetail.textContent = note;
+        }
     }
 }
 
@@ -272,7 +322,13 @@ function progressGap(gap) {
 
 function progressWrite() {
     progressSections += 1;
+    // Analysis is finished by the time sections stream, so mark it done --
+    // otherwise the evidence step sits "active" next to a finished report.
+    setStepState("analyse", "done");
     setStepState("write", "active");
+    if (progWriteTitle) {
+        progWriteTitle.textContent = "Writing the report";
+    }
     if (progWriteDetail) {
         progWriteDetail.textContent =
             `${progressSections} section${progressSections === 1 ? "" : "s"} streamed`;
@@ -654,6 +710,10 @@ function displayEvent(data, question) {
 
     if (data.type === "analysis") {
         renderAnalysis(data.data);
+    }
+
+    if (data.type === "progress") {
+        progressLive(data);
     }
 
     if (data.type === "gap") {
