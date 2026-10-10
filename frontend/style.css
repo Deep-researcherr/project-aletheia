@@ -10,6 +10,28 @@
     font-display: swap;
 }
 
+/* JetBrains Mono, bundled for the same reason as AnthropicSerif: relying on a
+   system font means a deploy or a different laptop silently renders the lockup
+   in something else, and that failure is invisible in the source.
+
+   SIL Open Font License 1.1, so it is safe to redistribute. The licence text
+   travels with the font, which OFL requires.
+
+   This replaced Comic Code, which looked right and is marked "Copyright 2019
+   Toshi Omagari. All rights reserved" -- not a redistribution licence, and
+   wrong to ship inside a public repository.
+
+   Declared at weight 400 only. JetBrains Mono has real weights available, but
+   bundling one weight and asking for 700 gives a synthetic bold, so only the
+   one file is shipped. */ 
+@font-face {
+    font-family: "JetBrains Mono";
+    src: url("./JetBrainsMono_font/JetBrainsMono-Regular.otf") format("opentype");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
 :root {
     font-family:
         "AnthropicSerif",
@@ -61,19 +83,33 @@ body {
 }
 
 /* Floating settings (3-dot) menu. Fixed so it stays put during scroll. */
-/* Top bar: wordmark sits hard left in the normal flow, so it aligns with the
-   container's own margin. The settings menu is fixed to the viewport edge
-   rather than the bar's, so it stays at the far right on a wide screen the way
-   it was before the wordmark moved to the left. */
-.topbar {
-    position: relative;
+/* Top bar: the wordmark is pinned to the viewport's left edge and the settings
+   menu to its right edge, so the two ends of the bar mirror each other.
 
-    max-width: 1100px;
-    margin: 0 auto;
-    padding: 18px 16px 6px;
+   Two things this must NOT be:
+
+   width-capped. It once carried `max-width: 1100px; margin: 0 auto` to line
+   the wordmark up with the page content, which put it 186px in from the left on
+   a 1440px screen -- the middle of the page wearing a top-left hat. The wordmark
+   is chrome, not content: it has no reason to track the content column, and the
+   settings menu has never tracked it either.
+
+   in normal flow. Making it a real block is what pushed the page content down:
+   the bar started taking ~64px of height above the hero, where the settings menu
+   used to be `position: fixed` and cost nothing. Taken out of flow again, the
+   page starts where it always did. */
+.topbar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+
+    max-width: none;
+    margin: 0;
+    padding: 14px 20px 0;
 
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 16px;
 }
@@ -85,18 +121,24 @@ body {
     z-index: 100;
 }
 
-/* Project Aletheia wordmark. Text only -- the mark lives in the favicon, where
-   it has room to breathe, rather than competing with the name at 32px. */
+/* Project Aletheia wordmark: a two-line lockup, "PROJECT" set small above
+   "ALETHEIA". Reading it in that order tells you it is a project, not a
+   product, before the name has finished loading in your eye.
+
+   Set in JetBrains Mono, bundled and OFL. The monospace fallback chain is
+   still there for the case where the font file fails to load, and it must not
+   contain a serif: falling back to the display serif would read as a different
+   design entirely rather than as a degraded one. */
 .brand {
     display: flex;
-    align-items: baseline;
+    align-items: flex-start;
 
     text-decoration: none;
     color: inherit;
 
-    border-radius: 10px;
-    padding: 4px 10px;
-    margin-left: -10px;          /* optical alignment: cancel the hover inset */
+    border-radius: 8px;
+    padding: 3px 8px;
+    margin-left: -8px;           /* optical alignment: cancel the hover inset */
 
     transition: background 0.18s ease;
 }
@@ -106,12 +148,28 @@ body {
 }
 
 .brand-name {
-    font-family: "AnthropicSerif", Georgia, "Times New Roman", serif;
-    font-size: 32px;
-    font-weight: 700;
-    letter-spacing: 0.015em;
-    text-transform: uppercase;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+
+    font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono",
+                 ui-monospace, SFMono-Regular, Menlo, monospace;
     line-height: 1;
+    text-transform: uppercase;
+}
+
+.brand-kicker {
+    font-size: 16px;
+    font-weight: 400;
+    letter-spacing: 0.42em;
+    color: var(--ink-soft, #8a8f98);
+    margin-bottom: 4px;
+}
+
+.brand-word {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
     color: var(--ink);
 }
 
@@ -120,12 +178,17 @@ body {
 }
 
 @media (max-width: 720px) {
-    .brand-name {
-        font-size: 24px;
+    .brand-word {
+        font-size: 23px;
+    }
+
+    .brand-kicker {
+        font-size: 14px;
+        letter-spacing: 0.34em;
     }
 
     .topbar {
-        padding: 14px 16px 4px;
+        padding: 12px 16px 0;
     }
 
     .settings {
