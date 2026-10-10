@@ -14,6 +14,7 @@ SerpApi ``/account`` (query param), Tavily ``/usage`` (Bearer), Firecrawl
 """
 import asyncio
 import time
+from pathlib import Path
 
 import pytest
 
@@ -209,13 +210,21 @@ def test_llm_status_does_not_import_litellm():
     """It runs before the run; a 7s cold import of litellm is not acceptable."""
     import subprocess
     import sys
+
+    # Resolved from this file rather than written as a literal. The subprocess
+    # needs the repository root on sys.path, and a hardcoded absolute path only
+    # works on whichever laptop it was typed on -- it happened to contain the
+    # project's old directory name, so a rename made it visibly wrong even
+    # though it was still passing here only because the local folder had not
+    # moved. cwd is set too, so the import works even if sys.path is ignored.
+    repo_root = Path(__file__).resolve().parents[1]
     code = ("import sys;"
-            "sys.path.insert(0, '/home/xe/Documents/deep-researcher');"
+            f"sys.path.insert(0, {str(repo_root)!r});"
             "from backend.research import services;"
             "services._model_chain();"
             "print('LITELLM' if 'litellm' in sys.modules else 'CLEAN')")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                         text=True, timeout=120)
+                         text=True, timeout=120, cwd=str(repo_root))
     assert "CLEAN" in out.stdout, out.stdout + out.stderr
 
 
