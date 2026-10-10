@@ -128,6 +128,53 @@ cp .env.example .env                     # then fill in your keys
 `requirements.txt` plus `pytest` and `dukpy` (used to execute
 `frontend/markdown.js` under test).
 
+## Running
+
+```bash
+python run.py
+```
+
+That checks the environment, then serves on <http://127.0.0.1:8000>. There is
+**no second process**: `backend/main.py` mounts `frontend/` as static files at
+`/`, so the same uvicorn that answers `/health` also serves the UI, the SSE
+stream and the exports. A separate frontend dev server has nothing to do —
+there is no build step.
+
+The preflight exists because this project's characteristic failure is silent.
+A missing API key does not crash a run; it quietly searches with fewer engines
+and says nothing in the report. `run.py` checks the packages parsed from
+`requirements.txt`, the required keys in `.env`, and the bundled fonts the
+stylesheet references, and reports each one.
+
+```
+Project Aletheia — preflight
+
+  ok 12 packages present
+
+  ok SERPAPI_KEY
+  ok LLM_MODEL
+  ! 3/6 optional provider keys
+      absent: EXA_API_KEY, JINA_API_KEY, TINYFISH_API_KEY
+      each one removes a search engine or a fetch fallback.
+      a run without them still succeeds -- and says nothing.
+
+  ok Anthropic_font/AnthropicSerif-Display-Regular-Static.otf
+  x JetBrainsMono_font/JetBrainsMono-Regular.otf referenced but missing
+
+not ready
+```
+
+Missing packages stop it before launching. Absent optional keys are a warning,
+never fatal — nobody runs a personal project with six provider keys wired.
+
+| Flag | Effect |
+|---|---|
+| `--check` | check only, exit 1 if something required is missing |
+| `--install` | install missing packages first |
+| `--dev` | include dev requirements (pytest, dukpy) |
+| `--port 9000` | serve elsewhere |
+| `--reload` | uvicorn `--reload`, for editing |
+
 ### Verifying the install
 
 ```bash
