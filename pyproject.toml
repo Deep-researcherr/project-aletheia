@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "deep-researcher"
+name = "project-aletheia"
 version = "2.0.0"
 description = "Agentic research system: parallel search, full-text retrieval, traceable synthesis"
 readme = "README.md"
