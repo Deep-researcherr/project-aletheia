@@ -424,8 +424,19 @@ class Fetcher:
             if bioc is not None:
                 return bioc
 
-        if "application/pdf" in doc.content_type or head[:5] == b"%pdf-":
+        if head[:5] == b"%pdf-":
             return self._from_pdf(doc, body)
+        if "application/pdf" in doc.content_type:
+            # The server claims PDF and the bytes disagree. That happens for
+            # bot walls, signed-URL interstitials and expired links, which all
+            # arrive as text wearing a PDF content-type. Trusting the header
+            # handed those to pypdf, which emitted "invalid pdf header" and then
+            # lost the document entirely -- the bytes are the authority, so this
+            # falls through and is parsed as whatever it actually is.
+            log.debug("content-type says PDF but the body starts %r; "
+                      "treating it as the content it is",
+                      body[:12][:40])
+            head = body[:2048].lower()
         if _ARXIV_ID.search(doc.final_url or doc.url):
             return self._from_arxiv(doc, body)
         match = github_repo(doc.final_url or doc.url)
@@ -603,7 +614,15 @@ class Fetcher:
 
     # -- PMC BioC ----------------------------------------------------------
     def _from_bioc(self, doc: FetchedDoc, pmcid: str) -> FetchedDoc | None:
-        """Full text as clean JSON via the PMC BioC API. None to fall through."""
+        """Full text as clean JSON via the PMC BioC API. None to fall through.
+
+        The endpoint answers with a BioCCollection, which is a JSON *list* of
+        collections, each holding its own ``documents``. It used to answer with
+        a bare object, and this method assumed that -- so it raised
+        AttributeError on every PMC article and the run quietly lost the best
+        full-text source it had, falling back to a scraped markdown page
+        instead. Both shapes are handled so a future change back is harmless.
+        """
         try:
             resp = self.session.get(
                 "https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/"
@@ -614,14 +633,23 @@ class Fetcher:
             data = json.loads(resp.text)
         except (requests.RequestException, ValueError):
             return None
+        collections = data if isinstance(data, list) else [data]
         parts = []
-        for document in data.get("documents") or []:
-            for passage in document.get("passages") or []:
-                section = ((passage.get("infons") or {}).get("section_type") or "")
-                text = (passage.get("text") or "").strip()
-                if not text:
+        for collection in collections:
+            if not isinstance(collection, dict):
+                continue
+            for document in collection.get("documents") or []:
+                if not isinstance(document, dict):
                     continue
-                parts.append(f"## {section}\n\n{text}" if section else text)
+                for passage in document.get("passages") or []:
+                    if not isinstance(passage, dict):
+                        continue
+                    section = (
+                        (passage.get("infons") or {}).get("section_type") or "")
+                    text = (passage.get("text") or "").strip()
+                    if not text:
+                        continue
+                    parts.append(f"## {section}\n\n{text}" if section else text)
         text = _clean("\n\n".join(parts))
         if len(text.split()) < 50:
             return None
