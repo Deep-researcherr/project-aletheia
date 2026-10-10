@@ -115,7 +115,7 @@ The backend is FastAPI; the frontend is plain HTML/CSS/JS with no build step. Fa
 
 ```bash
 git clone <repository-url>
-cd deep-researcher
+cd project-aletheia
 
 python3 -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
@@ -552,7 +552,7 @@ NOT provided". The prefix is the provider, not always the vendor.
 ## Project structure
 
 ```text
-deep-researcher/
+project-aletheia/
 ├── backend/
 │   ├── main.py                  FastAPI app, CORS, SSE, export download
 │   ├── research/
