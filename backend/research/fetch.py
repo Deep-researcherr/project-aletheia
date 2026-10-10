@@ -142,13 +142,29 @@ class Fetcher:
                                      "Accept-Language": "en;q=0.9"})
         self.budget = config.total_fetch_budget()
         self.fetched = 0
-        self.tavily_used = 0          # paid fallback calls, per research run
-        self.firecrawl_used = 0
+        # Per-run spend per extract provider. A dict rather than one attribute
+        # per provider because the tier list is registry-driven: a new provider
+        # has to be describable here without touching this class.
+        self._paid_used: dict[str, int] = {}
         # fetch_many runs this fetcher across worker threads; every budget
         # check-and-increment must be atomic, or parallel workers both pass
         # a cap of 1 and overspend the run (double Tavily calls, fetch
         # budget overshoot).
         self._counter_lock = threading.Lock()
+
+    # Kept as named counters because they are read in the run report and in
+    # tests; the storage is the dict above. Read-only: spend happens through
+    # _claim_paid, which is the only place that may increment.
+    @property
+    def tavily_used(self) -> int:
+        return self._paid_used.get("tavily", 0)
+
+    @property
+    def firecrawl_used(self) -> int:
+        return self._paid_used.get("firecrawl", 0)
+
+    def paid_used(self, name: str) -> int:
+        return self._paid_used.get(name, 0)
 
     # -- budget ------------------------------------------------------------
     def exhausted(self) -> bool:
@@ -164,16 +180,17 @@ class Fetcher:
             return True
 
     def _claim_paid(self, service: str) -> bool:
-        """Atomically reserve one paid fallback call within its per-run cap."""
+        """Atomically reserve one fallback call within that provider's per-run cap.
+
+        Generic over the provider name: the cap comes from the registry, so a
+        new extract tier is budgeted the same way the two existing ones are,
+        with no branch to add here and no way to forget the lock.
+        """
         with self._counter_lock:
-            if service == "tavily":
-                if self.tavily_used >= config.tavily_max_per_run():
-                    return False
-                self.tavily_used += 1
-                return True
-            if self.firecrawl_used >= config.firecrawl_max_per_run():
+            spent = self._paid_used.get(service, 0)
+            if spent >= config.provider_max_per_run(service):
                 return False
-            self.firecrawl_used += 1
+            self._paid_used[service] = spent + 1
             return True
 
     # -- robots ------------------------------------------------------------
@@ -276,9 +293,25 @@ class Fetcher:
         return self._with_fallback(url, doc)
 
     def _with_fallback(self, url: str, doc: FetchedDoc) -> FetchedDoc:
-        """Recover a failed fetch, cheapest first: open-access copy, Tavily,
-        Firecrawl. Robots-blocked URLs never reach here, so every tier stays
-        within what the site already allows us to read.
+        """Recover a failed fetch: open-access copy first, then the tier chain.
+
+        The chain is registry-driven (``providers.extract_tiers``), ordered
+        cheapest-and-most-likely first, and stops at the first provider that
+        answers -- so a recovered page costs one provider call rather than one
+        per provider. Override the order with EXTRACT_TIER_ORDER.
+
+        The trade this makes is latency: worst case is the *sum* of each
+        provider's timeout on a page that every one of them fails to read. That
+        is the reason a hedge (launch the next provider if the current one has
+        not answered within a few seconds) would be worth considering, but it
+        is only worth it if providers actually hang rather than fail fast.
+
+        Robots-blocked URLs never reach here, so every tier stays within what
+        the site already allows us to read. Note that a provider rendering the
+        page in its own browser can technically fetch pages robots.txt
+        disallows; the ordering keeps those last, and a run can drop them
+        entirely with EXTRACT_TIER_ORDER, but that is a policy choice to make
+        deliberately rather than a guarantee.
         """
         if doc.status != FAILED:
             return doc
@@ -291,12 +324,22 @@ class Fetcher:
             recovered = self._fetch_copy(url, oa_url)
             if recovered is not None:
                 return recovered
-        recovered = self._paid_fallback(url, "tavily")
-        if recovered is not None:
-            return recovered
-        recovered = self._paid_fallback(url, "firecrawl")
-        if recovered is not None:
-            return recovered
+        from . import providers as _providers
+        for provider in _providers.wired_extract_tiers():
+            try:
+                recovered = self._tier(url, provider)
+            except Exception as exc:
+                # Each tier is isolated here, deliberately. Letting a raise
+                # propagate looks harmless but is not: fetch() wraps this whole
+                # method in its own try, catches, and then calls _with_fallback
+                # a second time on the way out -- so one malformed provider
+                # response ran the entire chain twice and billed every provider
+                # twice for a single URL. A broken tier should cost one tier.
+                log.warning("extract tier %s failed on %s: %s",
+                            provider.name, url, exc)
+                continue
+            if recovered is not None:
+                return recovered
         return doc
 
     def _fetch_copy(self, url: str, target: str) -> FetchedDoc | None:
@@ -321,27 +364,21 @@ class Fetcher:
             log.debug("open-access copy failed for %s: %s", url, exc)
         return None
 
-    def _paid_fallback(self, url: str, service: str) -> FetchedDoc | None:
-        """One paid extraction attempt, respecting keys and per-run caps."""
-        import os
-        if service == "tavily":
-            if not (os.environ.get("TAVILY_API_KEY") or "").strip():
-                return None
-            if not self._claim_paid("tavily"):
-                return None
-            from .webextract import tavily_extract
-            result = tavily_extract(url)
-        else:
-            if not (os.environ.get("FIRECRAWL_API_KEY") or "").strip():
-                return None
-            if not self._claim_paid("firecrawl"):
-                return None
-            from .webextract import firecrawl_scrape
-            result = firecrawl_scrape(url)
+    def _tier(self, url: str, provider) -> FetchedDoc | None:
+        """Try one registry extract provider, respecting its per-run cap.
+
+        One tier of the chain in :meth:`_with_fallback`. The cap is claimed
+        before the call, so N concurrent fetch workers cannot each pass a
+        check against a cap of 1, and a provider that declines still costs its
+        slot -- which is what its own billing will say too.
+        """
+        if not self._claim_paid(provider.name):
+            return None
+        result = provider.run_extract(url)
         if not result:
             return None
         title, text = result
-        return self._external_doc(url, title, text, service)
+        return self._external_doc(url, title, text, provider.method_name)
 
     @staticmethod
     def _external_doc(url: str, title: str, text: str, method: str) -> FetchedDoc | None:
@@ -387,8 +424,19 @@ class Fetcher:
             if bioc is not None:
                 return bioc
 
-        if "application/pdf" in doc.content_type or head[:5] == b"%pdf-":
+        if head[:5] == b"%pdf-":
             return self._from_pdf(doc, body)
+        if "application/pdf" in doc.content_type:
+            # The server claims PDF and the bytes disagree. That happens for
+            # bot walls, signed-URL interstitials and expired links, which all
+            # arrive as text wearing a PDF content-type. Trusting the header
+            # handed those to pypdf, which emitted "invalid pdf header" and then
+            # lost the document entirely -- the bytes are the authority, so this
+            # falls through and is parsed as whatever it actually is.
+            log.debug("content-type says PDF but the body starts %r; "
+                      "treating it as the content it is",
+                      body[:12][:40])
+            head = body[:2048].lower()
         if _ARXIV_ID.search(doc.final_url or doc.url):
             return self._from_arxiv(doc, body)
         match = github_repo(doc.final_url or doc.url)
@@ -566,7 +614,15 @@ class Fetcher:
 
     # -- PMC BioC ----------------------------------------------------------
     def _from_bioc(self, doc: FetchedDoc, pmcid: str) -> FetchedDoc | None:
-        """Full text as clean JSON via the PMC BioC API. None to fall through."""
+        """Full text as clean JSON via the PMC BioC API. None to fall through.
+
+        The endpoint answers with a BioCCollection, which is a JSON *list* of
+        collections, each holding its own ``documents``. It used to answer with
+        a bare object, and this method assumed that -- so it raised
+        AttributeError on every PMC article and the run quietly lost the best
+        full-text source it had, falling back to a scraped markdown page
+        instead. Both shapes are handled so a future change back is harmless.
+        """
         try:
             resp = self.session.get(
                 "https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/"
@@ -577,14 +633,23 @@ class Fetcher:
             data = json.loads(resp.text)
         except (requests.RequestException, ValueError):
             return None
+        collections = data if isinstance(data, list) else [data]
         parts = []
-        for document in data.get("documents") or []:
-            for passage in document.get("passages") or []:
-                section = ((passage.get("infons") or {}).get("section_type") or "")
-                text = (passage.get("text") or "").strip()
-                if not text:
+        for collection in collections:
+            if not isinstance(collection, dict):
+                continue
+            for document in collection.get("documents") or []:
+                if not isinstance(document, dict):
                     continue
-                parts.append(f"## {section}\n\n{text}" if section else text)
+                for passage in document.get("passages") or []:
+                    if not isinstance(passage, dict):
+                        continue
+                    section = (
+                        (passage.get("infons") or {}).get("section_type") or "")
+                    text = (passage.get("text") or "").strip()
+                    if not text:
+                        continue
+                    parts.append(f"## {section}\n\n{text}" if section else text)
         text = _clean("\n\n".join(parts))
         if len(text.split()) < 50:
             return None

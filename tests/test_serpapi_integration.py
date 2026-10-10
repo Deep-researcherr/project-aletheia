@@ -292,9 +292,11 @@ def test_timed_out_search_becomes_a_failed_entry_not_a_stall(monkeypatch):
     monkeypatch.setattr(graph_module, "search_full", boom)
 
     update = asyncio.run(graph_module.search_worker(
-        {"source": "web", "query": "q"}))
+        {"source": "web", "query": "q", "seq": "1:000:00"}))
 
-    assert update["raw"] == []
+    # Results are filed under their routing seq so they can be read back in
+    # submission order; see graph._ordered_raw.
+    assert update["raw_by_task"] == {"1:000:00": []}
     assert "timed out" in update["log"][0]["error"]
     assert update["log"][0]["count"] == 0
 

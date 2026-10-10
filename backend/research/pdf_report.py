@@ -29,6 +29,12 @@ from reportlab.platypus import (BaseDocTemplate, HRFlowable, PageTemplate,
 
 NAVY = colors.HexColor("#1B2A4A")
 TEAL = colors.HexColor("#0E7C7B")
+
+#: Product name, used for the header band, the per-page footer and the
+#: document metadata. One constant so the three cannot drift apart -- a
+#: PDF whose cover says one thing and whose footer says another reads as
+#: a bug in the export rather than as branding.
+PROJECT_NAME = "Project Aletheia"
 LIGHT_BG = colors.HexColor("#F3F5F9")
 CARD_BORDER = colors.HexColor("#D9E2EC")
 MUTED = colors.HexColor("#5B6B7F")
@@ -932,14 +938,14 @@ def build_pdf(bundle: dict, rounds_label: str = "",
 
     slug = _slugify(question)
     today_str = datetime.date.today().isoformat()
-    band_title = "DEEP RESEARCHER  \u2014  RESEARCH REPORT"
+    band_title = f"{PROJECT_NAME.upper()}  \u2014  RESEARCH REPORT"
     band_sub = f"{question.strip()[:90]}  \u2022  {today_str}"
-    footer_tag = f"Deep Researcher  \u2022  {slug}"
+    footer_tag = f"{PROJECT_NAME}  \u2022  {slug}"
 
     buf = _io.BytesIO()
     doc = BaseDocTemplate(buf, pagesize=A4,
                           leftMargin=54, rightMargin=54, topMargin=78, bottomMargin=48,
-                          title=question.strip()[:120], author="Deep Researcher")
+                          title=question.strip()[:120], author=PROJECT_NAME)
     frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="main")
     doc.addPageTemplates([PageTemplate(id="all", frames=[frame],
                                        onPage=make_header_footer(band_title, band_sub,

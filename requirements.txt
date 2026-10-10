@@ -19,6 +19,10 @@ lxml
 
 # PDF full-text extraction (papers, benchmark reports)
 pypdf
+# pypdf parses PDF text without it, but warns on every CFF/Type1 font it cannot
+# decode and can extract the wrong characters. It said so on every journal PDF
+# in a real run.
+fonttools
 
 # Dynamic "Save PDF" report export (reportlab Platypus layout only;
 # no Pillow needed: fractions render as compact superscript/subscript)

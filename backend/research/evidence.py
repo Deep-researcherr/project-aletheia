@@ -29,12 +29,27 @@ _SOURCE_TYPE_LABELS = {
     "gutenberg": "Project Gutenberg ebook",
     "springer": "Springer article",
     "pmc": "PubMed Central full text",
-    "tavily": "page extracted via Tavily",
-    "firecrawl": "page extracted via Firecrawl",
     "plain": "plain text / code",
     "html": "web page",
     "none": "unknown",
 }
+
+# Legend text for every registered provider comes from the registry, so adding
+# a provider there puts it in the report without a second edit here. Keys are
+# the search source name and the fetch method name, which is why a provider
+# with both roles carries two distinct strings.
+try:
+    from .providers import for_role as _for_role
+
+    for _provider in _for_role("search"):
+        if _provider.source_label:
+            _SOURCE_TYPE_LABELS.setdefault(_provider.source, _provider.source_label)
+    for _provider in _for_role("extract"):
+        if _provider.method_label:
+            _SOURCE_TYPE_LABELS.setdefault(_provider.method_name,
+                                           _provider.method_label)
+except Exception:                      # noqa: BLE001 - legend text is not load-bearing
+    pass
 
 
 @dataclass
@@ -183,6 +198,12 @@ def normalise_confidence(value, default: float = 0.5) -> float:
 
 
 def source_type_label(source_type: str) -> str:
+    """Human label for a search result type or a fetch method.
+
+    Falls back to "web page" rather than raising: this is called while writing
+    a report, and a report must not fail to print because one document carried
+    a type string nothing has heard of.
+    """
     return _SOURCE_TYPE_LABELS.get((source_type or "").lower(), "web page")
 
 

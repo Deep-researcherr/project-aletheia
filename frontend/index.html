@@ -4,16 +4,24 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>Deep Researcher</title>
+    <title>Project Aletheia</title>
 
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23D97756'/%3E%3Ctext x='32' y='43' font-family='Georgia,serif' font-size='30' font-weight='bold' text-anchor='middle' fill='white'%3EDR%3C/text%3E%3C/svg%3E">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M82.2 67.2 A36.5 36.5 0 1 0 17.8 67.2' fill='none' stroke='%23E9B031' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M32.6 58.5 L50 30.5 L67.4 58.5' fill='none' stroke='%23E9B031' stroke-width='9' stroke-linecap='butt' stroke-linejoin='miter' stroke-miterlimit='6'/%3E%3C/svg%3E">
 
     <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
-    <div class="settings">
+    <div class="topbar">
+        <a class="brand" href="/" aria-label="Project Aletheia">
+            <span class="brand-name">
+                <span class="brand-kicker">Project</span>
+                <span class="brand-word">Aletheia</span>
+            </span>
+        </a>
+
+        <div class="settings">
         <button id="settings-button" type="button" class="settings-dots" title="Settings" aria-haspopup="true" aria-expanded="false" aria-controls="settings-menu">
             <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
         </button>
@@ -25,6 +33,7 @@
                     </span>
                     <span class="theme-label">Light mode</span>
                 </button>
+        </div>
         </div>
     </div>
 

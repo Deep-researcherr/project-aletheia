@@ -209,14 +209,55 @@ def fetch_respect_robots() -> bool:
     return _bool("FETCH_RESPECT_ROBOTS", True)
 
 
+def provider_max_per_run(name: str) -> int:
+    """Per-run cap for one extract provider. 0 disables that tier.
+
+    The default lives in the registry (``Provider.cap_default``) rather than
+    here, so adding a provider does not also mean editing the config module:
+    the env var is the override, the registry entry is the default.
+
+    The env var is the provider name uppercased with a ``_MAX_PER_RUN``
+    suffix, which is what TAVILY_MAX_PER_RUN and FIRECRAWL_MAX_PER_RUN already
+    were -- so the two existing variables keep working unchanged and the new
+    providers follow the same shape.
+    """
+    try:
+        from .providers import for_role
+
+        provider = next((p for p in for_role("extract") if p.name == name), None)
+        default = provider.cap_default if provider else 10
+    except Exception:
+        default = 10
+    return _int(f"{name.upper()}_MAX_PER_RUN", default, 0, 500)
+
+
 def tavily_max_per_run() -> int:
     """Paid Tavily fallback pages per research run. 0 disables it."""
-    return _int("TAVILY_MAX_PER_RUN", 10, 0, 200)
+    return provider_max_per_run("tavily")
 
 
 def firecrawl_max_per_run() -> int:
     """Paid Firecrawl fallback pages per research run. 0 disables it."""
-    return _int("FIRECRAWL_MAX_PER_RUN", 4, 0, 200)
+    return provider_max_per_run("firecrawl")
+
+
+def search_fanout() -> bool:
+    """Ask every wired open-web engine each general query, concurrently.
+
+    Default on. The engines rank differently -- keyword, semantic, independent
+    index -- so the union of their answers is more evidence than the best
+    single one, and the collector dedupes by URL so the overlap costs nothing
+    but a fetch attempt.
+
+    Turn it off to go back to one engine per planned query, which is a third
+    of the search spend and a thinner report.
+    """
+    return _bool("SEARCH_FANOUT", True)
+
+
+def search_fanout_max_engines() -> int:
+    """Ceiling on engines per general query. 0 means no ceiling."""
+    return _int("SEARCH_FANOUT_MAX_ENGINES", 0, 0, 12)
 
 
 def fetch_max_chars() -> int:

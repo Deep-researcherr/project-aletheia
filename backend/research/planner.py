@@ -27,7 +27,17 @@ its of on or the their there these this to what which who why with do does did
 about across during over under
 """.split())
 
-SOURCES = ("web", "news", "scholar", "github", "patent", "arxiv")
+# SerpApi engines plus every source the provider registry offers. Built from
+# the registry so a provider added there becomes plannable here without a
+# second edit -- and, more importantly, so it cannot be added to the registry
+# and then be silently dropped, which would spend a call per sub-question and
+# return nothing.
+def _sources() -> tuple[str, ...]:
+    from .providers import source_names
+    return ("web", "news", "scholar", "github", "patent", "arxiv") + source_names()
+
+
+SOURCES = _sources()
 
 SYSTEM = """You are a research planner. Break the user's question into 10-14 sub-questions.
 Sub-questions must be DISTINCT from each other: each must cover a different
@@ -48,6 +58,13 @@ For each, give 2-3 concrete search queries and the best source for each:
 - patent: patented mechanisms, filings, prior art (technical questions only)
 - arxiv: preprints and very recent methods (quantitative/technical questions
   only; skip for law, history or other non-technical subjects)
+- exa: pages that mean what the question means even when the wording differs;
+  use when the obvious keywords would miss the right page
+- tinyfish: an independent web index; use as a second opinion on a claim
+- jina: pages returned with their own summaries attached
+These three rank differently from web, so route to them only when a sub-question
+would genuinely benefit -- spreading every query across all of them retrieves
+six near-copies of the same page and wastes the budget.
 Return JSON only:
 {"subquestions":[{"question":"...","searches":[{"source":"web","query":"..."}]}]}
 Today's date is {today}. Include the current year in queries where recency matters.

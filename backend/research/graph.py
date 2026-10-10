@@ -56,6 +56,15 @@ At most 3 follow_ups. Prefer queries that would reach primary sources, benchmark
 documentation over general commentary."""
 
 
+def _merge_dicts(left: dict, right: dict) -> dict:
+    """LangGraph reducer for raw_by_task.
+
+    Keys are unique per task, so a plain merge is enough; the reducer exists
+    only because LangGraph needs one for an Annotated dict field.
+    """
+    return {**(left or {}), **(right or {})}
+
+
 class State(TypedDict, total=False):
     question: str
     max_rounds: int
@@ -64,6 +73,7 @@ class State(TypedDict, total=False):
     pending: list                         # searches to run next
     seen: list                            # "source|query" already run
     raw: Annotated[list, operator.add]    # parallel workers append here
+    raw_by_task: Annotated[dict, _merge_dicts]   # submission-ordered search results
     log: Annotated[list, operator.add]
     paa: Annotated[list, operator.add]   # related questions/searches bank
     ai_leads: Annotated[list, operator.add]  # AI-overview reference links
@@ -91,9 +101,31 @@ class State(TypedDict, total=False):
     export: dict
 
 
+def _ordered_raw(state) -> list:
+    """Search results in submission order, never completion order.
+
+    LangGraph merges a superstep's writes in the order the tasks finish, and
+    fanning a query out across every engine multiplies the number of tasks
+    racing in one superstep -- so completion order is both already unstable and
+    about to get worse. The collector numbers sources from insertion order and
+    those numbers are what the report's citations point at, so both `collect`
+    and `retrieve` read through here rather than trusting `raw` directly.
+
+    Falls back to `raw` for nodes invoked directly with it (tests, and any
+    caller that has not been through a router).
+    """
+    by_task = state.get("raw_by_task") or {}
+    if by_task:
+        ordered: list = []
+        for seq in sorted(by_task):
+            ordered.extend(by_task[seq] or [])
+        return ordered
+    return list(state.get("raw") or [])
+
+
 def _col(state) -> Collector:
     col = Collector()
-    col.add([dict(r) for r in state.get("raw", [])])
+    col.add([dict(r) for r in _ordered_raw(state)])
     return col
 
 
@@ -243,10 +275,50 @@ def planner(state):
     return update
 
 
+def _fan_out(pending: list, rnd: int) -> list[dict]:
+    """Expand each planned search into one task per wired open-web engine.
+
+    This is the whole point of routing through a registry: a query the planner
+    marked as general web search is asked of SerpApi, Exa, TinyFish and Jina at
+    once, and the collector unions the results by URL. Each engine ranks
+    differently -- semantic, keyword, index -- so the union is meaningfully more
+    than the best single one rather than four copies of the same page.
+
+    Corpus-specific sources (scholar, patent, github, arxiv, news) are left
+    alone. Asking a patent query of a news index does not add evidence, it
+    discards the constraint that made it a patent query.
+
+    Every task carries a deterministic ``seq`` so results can be reassembled in
+    submission order. LangGraph merges a superstep's writes in completion
+    order, so without this the source numbering would reshuffle between runs.
+    """
+    from . import providers as _registry
+
+    fanout = config.search_fanout()
+    general: list[str] = []
+    if fanout:
+        general = list(_registry.wired_general_sources())
+        cap = config.search_fanout_max_engines()
+        if cap:
+            # wired_general_sources puts SerpApi first, so truncating keeps the
+            # richest engine rather than dropping it in favour of whichever
+            # registry name happened to sort first.
+            general = general[:cap]
+    tasks: list[dict] = []
+    for index, task in enumerate(pending or []):
+        source = (task or {}).get("source")
+        targets = list(general) if source in general else [source]
+        for offset, target in enumerate(targets):
+            tasks.append({**task, "source": target,
+                          "seq": f"{rnd}:{index:03d}:{offset:02d}"})
+    return tasks
+
+
 def route(state):
     """After the planner: fan out over searches, or start retrieval."""
     if state.get("pending"):
-        return [Send("search_worker", p) for p in state["pending"]]
+        rnd = state.get("round", 1)
+        return [Send("search_worker", p) for p in _fan_out(state["pending"], rnd)]
     return "retrieve"
 
 
@@ -259,7 +331,8 @@ def route_after_gap(state):
     pass.
     """
     if state.get("pending"):
-        return [Send("search_worker", p) for p in state["pending"]]
+        rnd = state.get("round", 1)
+        return [Send("search_worker", p) for p in _fan_out(state["pending"], rnd)]
     return "contradiction_check"
 
 
@@ -276,7 +349,12 @@ async def search_worker(task):
         if isinstance(ref, dict) and ref.get("link"):
             leads.append({"title": ref.get("title", ""),
                           "url": ref["link"]})
-    return {"raw": res, "log": [{**task, "count": len(res), "error": err}],
+    seq = task.get("seq", "")
+    # Written to raw_by_task only. Keeping a copy in `raw` as well would double
+    # the state's search payload for no benefit now that _ordered_raw exists.
+    return {"raw_by_task": {seq: res},
+            "log": [{**{k: v for k, v in task.items() if k != "seq"},
+                     "count": len(res), "error": err}],
             "paa": bank, "ai_leads": leads}
 
 
