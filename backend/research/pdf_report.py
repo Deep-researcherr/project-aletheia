@@ -52,7 +52,50 @@ def esc(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", flags=re.S)
+
+
+def strip_html_comments(markdown: str) -> str:
+    """Remove HTML comments before anything downstream reads the markdown.
+
+    ``report.py`` deliberately hides non-critical pipeline advisories in an
+    HTML comment -- correct for the ``.md`` export, where a renderer ignores
+    it. The PDF has no such luxury: the body renderer skips comment blocks,
+    but ``parse_references`` does not, so a comment that lands inside the
+    References section falls through to the catch-all branch and is absorbed
+    into the reference's ``meta`` field.
+
+    That field is unbounded, so a 4KB advisory becomes a ~4300-character meta,
+    which becomes a single-cell Table taller than the page frame, which
+    ReportLab cannot split -- and one oversized card took the *entire* PDF
+    down with it. Observed on the topological-qubits report, where reference
+    15 rendered 718pt tall against a 703.89pt frame.
+
+    Stripped once, here, so the body renderer, the reference parser, the
+    note builder and the word/citation counters all see the same text.
+    """
+    return _HTML_COMMENT_RE.sub("", markdown or "")
+
+
 _URL_RE = re.compile(r"https?://\S+|www\.\S+")
+
+
+# A reference card is a single-cell Table, and ReportLab cannot place a row
+# taller than the page frame -- it raises and the whole PDF is lost. These caps
+# keep any one field from ever producing a card that tall. The longest meta seen
+# in practice was ~4300 chars (an unstripped HTML comment); a 300-char cap puts
+# the worst realistic card near 130pt against a 703.89pt frame.
+META_MAX_CHARS = 300
+NOTE_MAX_CHARS = 600
+
+
+def _cap(text: str, limit: int) -> str:
+    """Truncate on a word boundary, marking that something was dropped."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return (cut or text[:limit]) + " …"
 
 
 def fix_maths(raw):
@@ -350,6 +393,66 @@ def section_rule():
                       spaceAfter=4, spaceBefore=0)
 
 
+_DISCLOSURE_RE = re.compile(r"^#{2,3}\s+(.+)$", re.M)
+
+
+def trailing_disclosures(markdown: str) -> list[tuple[str, str]]:
+    """Sections that sit *after* the References block, as (heading, body).
+
+    ``report.py`` appends the run's integrity disclosure last, so everything
+    between the References heading and end-of-document is machine-generated
+    commentary about the run rather than report body.
+
+    This has to be extracted explicitly. ``build_pdf`` cuts the report body at
+    "## Evidence by Source", which sits *before* References, and ``
+    render_refs`` only draws the reference cards. So the disclosure landed in
+    neither renderer and was dropped from the PDF entirely -- on a run that
+    was PARTIAL, the evidence-integrity warning appeared in the .md and
+    nowhere in the document a reader actually receives.
+
+    That is the exact failure the disclosure exists to prevent ("a pipeline
+    problem hidden in markup is a pipeline problem nobody reads"), so it is
+    rendered here rather than inferred from the bundle.
+    """
+    lines = (markdown or "").split("\n")
+    try:
+        start = next(i for i, ln in enumerate(lines)
+                     if ln.strip() == "## References")
+    except StopIteration:
+        return []
+    tail = "\n".join(lines[start + 1:])
+    if not tail.strip():
+        return []
+    chunks = _DISCLOSURE_RE.split(tail)
+    out = []
+    for i in range(1, len(chunks), 2):
+        heading = chunks[i].strip()
+        body = chunks[i + 1] if i + 1 < len(chunks) else ""
+        if heading:
+            out.append((heading, body.strip()))
+    return out
+
+
+def render_disclosures(story, S, markdown, known=None):
+    """Draw the post-References run disclosure, e.g. "How this run went"."""
+    blocks = trailing_disclosures(markdown)
+    for heading, body in blocks:
+        story.append(Spacer(1, 10))
+        story.append(P(esc(heading), S, "h2"))
+        story.append(section_rule())
+        for block in re.split(r"\n\s*\n", body.strip()):
+            block = block.strip()
+            if not block or block.startswith("<!--"):
+                continue
+            if block.startswith("- ") or block.startswith("* "):
+                for item in re.split(r"\n(?=\s*[-*] )", block):
+                    item = item.strip().lstrip("-* ").strip()
+                    if item:
+                        render_item(story, S, item, known)
+            else:
+                story.append(P(para(block, known), S))
+
+
 # ------------------------------------------------------- section body parser
 
 def render_sections(story, S, body_md, known=None):
@@ -416,7 +519,12 @@ def render_refs(story, S, refs):
                 f'{url_text}'
                 f' &nbsp;<font color="#5B6B7F">{esc(meta)}</font><br/>'
                 f'<b>Note \u2014 what [{n}] gives you:</b> {esc(note)}')
-        card = Table([[Paragraph(html, S["ref"])]], colWidths=[410])
+        # splitInRow lets an over-long card break across pages instead of
+        # raising LayoutError and taking the entire document with it. Same
+        # design rule as the rest of the project: one bad element degrades,
+        # it does not take the run down.
+        card = Table([[Paragraph(html, S["ref"])]], colWidths=[410],
+                     splitInRow=1)
         card.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), REF_BG),
             ("ROUNDEDCORNERS", [6, 6, 6, 6]),
@@ -614,7 +722,7 @@ def build_pdf(bundle: dict, rounds_label: str = "",
     from .export import slugify as _slugify
 
     question = bundle.get("question", "")
-    markdown = bundle.get("report", "")
+    markdown = strip_html_comments(bundle.get("report", ""))
     if not markdown.strip():
         raise ValueError("no report content to render")
     today = datetime.date.today().isoformat()
@@ -920,13 +1028,19 @@ def build_pdf(bundle: dict, rounds_label: str = "",
         shown = link if link.startswith("http") else ("https://doi.org/" + link if link else "")
         meta_bits = [b for b in [ref.get("meta", ""), ] if b]
         meta = " ".join(meta_bits)
-        cited = "; ".join(ref.get("cited", []))
+        # build_ref_notes() already prefixes "Cited from:" for the same list.
+        # Appending it again here duplicated the whole thing on every card that
+        # had any locations, which is most of them.
         note = ref_notes.get(num, "")
-        if cited:
-            note += (" " if note else "") + "Cited from: " + cited
+        meta = _cap(meta, META_MAX_CHARS)
+        note = _cap(note, NOTE_MAX_CHARS)
         cards.append((num, ref.get("title", ""), shown or link,
                       meta, note or "Cited in the report body."))
     render_refs(story, S, cards)
+    # Anything the generator wrote after References -- currently the run's
+    # integrity disclosure. Rendered last so it sits with the sources rather
+    # than being folded silently into the body.
+    render_disclosures(story, S, markdown)
 
     notes = analysis.get("notes") or []
     if notes:
