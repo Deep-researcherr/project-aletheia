@@ -193,28 +193,40 @@ def extract_evidence(
     parallelism = max(1, config.llm_parallelism())
 
     def run_batch(number: int, batch: list[Scored]):
-        """One extraction call. Returns (records, rejected, error) and never raises."""
+        """One extraction call. Returns (records, rejected, error, status).
+
+        Never raises: a bad batch must not kill the run.
+        """
         payload = _render_batch(batch, question, dims, tgts)
         try:
             reply = ask(EXTRACT_SYSTEM, payload, json_mode=True, role="judge")
         except LLMChainError as exc:
             log.warning("extraction batch %d failed: %s", number, exc)
-            return [], 0, f"failed: {exc}"
+            return [], 0, f"failed: {exc}", "unusable"
         except Exception as exc:                       # a bad batch must not kill the run
             log.warning("extraction batch %d errored: %s: %s", number,
                         type(exc).__name__, str(exc)[:160])
-            return [], 0, f"errored: {type(exc).__name__}"
-        accepted, rejected = _harvest(reply, batch, by_id)
-        return accepted, rejected, None
+            return [], 0, f"errored: {type(exc).__name__}", "unusable"
+        accepted, rejected, status = _harvest(reply, batch, by_id)
+        return accepted, rejected, None, status
 
-    # Batches that came back with nothing at all. A batch can legitimately
-    # yield no records (the extraction prompt tells the model to skip passages
-    # with nothing useful), but a run where most batches return nothing has not
-    # extracted anything, and saying so is the whole point of this stage. The
-    # counters exist so that case is visible instead of silent.
-    silent_empty = 0
-    failed_batches = 0
+    # Two different things used to be counted as one.
+    #
+    #   declined -- the model answered and these passages hold nothing
+    #               extractable. Correct behaviour, and the commonest outcome
+    #               on reference lists, acknowledgements and figure captions.
+    #   unusable -- the reply could not be read as evidence at all. A real
+    #               failure that costs the run evidence.
+    #
+    # Only the second is a degraded run. Counting the first is what produced a
+    # false PARTIAL on a healthy report.
+    declined_batches = 0
+    declined_passages = 0
+    unusable_batches = 0
+    unusable_passages = 0
     attempted_batches = 0
+    attempted_passages = 0
+    failed_batches = 0
 
     index = 0
     while index < len(batches):
@@ -244,26 +256,31 @@ def extract_evidence(
             parallelism,
         )
 
-        for (number, batch), (accepted, rejected, error) in zip(numbered, results):
+        for (number, batch), (accepted, rejected, error, status) in zip(numbered, results):
             attempted_batches += 1
+            attempted_passages += len(batch)
             if error is not None:
                 failed_batches += 1
+                unusable_batches += 1
+                unusable_passages += len(batch)
                 kind, _, detail = error.partition(": ")
                 notes.append(f"extraction batch {number} {kind}: {detail}")
                 continue
             calls += 1
             records.extend(accepted)
-            if not accepted and not rejected:
-                # No records and nothing discarded: the model answered, but
-                # with nothing usable. Previously this produced no note at all,
-                # so a run could lose most of its batches and still be
-                # reported as complete.
-                silent_empty += 1
+            if status == "no_evidence":
+                declined_batches += 1
+                declined_passages += len(batch)
+                log.info("extraction batch %d: no extractable claims in %d "
+                         "passage(s) (model declined)", number, len(batch))
+            elif status == "unusable":
+                unusable_batches += 1
+                unusable_passages += len(batch)
                 notes.append(
-                    f"extraction batch {number} returned no evidence for "
-                    f"{len(batch)} passage(s) and rejected nothing, so the "
-                    f"model's reply for these passages was unusable")
-                log.warning("extraction batch %d returned nothing usable "
+                    f"extraction batch {number} returned an unreadable reply for "
+                    f"{len(batch)} passage(s) and rejected nothing, so no "
+                    f"evidence could be read from the model's answer")
+                log.warning("extraction batch %d returned an unreadable reply "
                             "(%d passages)", number, len(batch))
             if rejected:
                 notes.append(f"extraction batch {number}: discarded {rejected} unverified "
@@ -283,19 +300,34 @@ def extract_evidence(
     for position, record in enumerate(records, 1):
         record.evidence_id = f"E{position}"
 
-    # Integrity check. If most extraction batches yielded nothing, the evidence
-    # base is not what a reader would assume it is, and the report must not
-    # claim otherwise. Marked so the report layer can surface it rather than
-    # filing it as an ordinary note.
-    if attempted_batches and silent_empty >= max(1, (attempted_batches + 1) // 2):
+    # A batch can legitimately yield nothing -- the extraction prompt tells the
+    # model to skip passages with nothing useful, and it does. That is not
+    # degradation, so it is counted separately and reported as an observation.
+    #
+    # What degrades a run is a reply that cannot be read as evidence. The
+    # threshold is weighted by PASSAGES, not batches, because the batches that
+    # fail this way are systematically the small ones: a 2-passage batch has a
+    # far higher chance of returning nothing legible than a 12-passage one. A
+    # batch-count threshold therefore read 30 of 40 batches -- "75%" -- when
+    # the passages actually lost were 71 of 433, about 16%.
+    if declined_batches:
+        notes.append(
+            f"the model reported no extractable claims for {declined_batches} of "
+            f"{attempted_batches} batches ({declined_passages} of "
+            f"{attempted_passages} passages); these were passages with no "
+            f"usable content, which is the model declining rather than failing")
+
+    if attempted_batches and attempted_passages and (
+            unusable_passages * 2 >= attempted_passages):
         notes.insert(0, INTEGRITY_PREFIX + (
-            f"evidence extraction returned nothing usable for "
-            f"{silent_empty} of {attempted_batches} passage batches"
+            f"evidence extraction got an unreadable reply for "
+            f"{unusable_batches} of {attempted_batches} passage batches "
+            f"({unusable_passages} of {attempted_passages} passages)"
             + (f", and {failed_batches} batch(es) failed outright"
                if failed_batches else "")
             + " — the findings below rest on a partial evidence base"))
-        log.error("evidence extraction degraded: %d/%d batches unusable",
-                  silent_empty, attempted_batches)
+        log.error("evidence extraction degraded: %d/%d passages unreadable",
+                  unusable_passages, attempted_passages)
 
     # Target fidelity: evidence about a related-but-different variant (another
     # release, another architecture class) is capped at moderate and labelled,
@@ -349,13 +381,41 @@ def _render_batch(batch: list[Scored], question: str,
 
 
 def _harvest(reply, batch: list[Scored],
-             by_id: dict[str, Chunk]) -> tuple[list[Evidence], int]:
-    """Validate model output against the passages that were actually sent."""
-    if not isinstance(reply, dict):
-        return [], 0
-    raw = reply.get("evidence")
-    if not isinstance(raw, list):
-        return [], 0
+             by_id: dict[str, Chunk]) -> tuple[list[Evidence], int, str]:
+    """Validate model output against the passages that were actually sent.
+
+    Returns ``(accepted, rejected, status)`` where status is one of:
+
+      ``ok``           the reply carried at least one usable or discarded entry
+      ``no_evidence``  the model answered and declined -- these passages hold
+                       nothing extractable
+      ``unusable``     the reply could not be read as evidence at all
+
+    The distinction is not cosmetic. Verified live against the extraction
+    prompt: asked about a passage that was a reference list, acknowledgements
+    and a figure caption, the model replied with a bare ``[]`` -- declining to
+    invent claims, which is exactly the behaviour the grounding guard exists to
+    encourage. The old code read any non-dict as a dead reply, so correct
+    behaviour was reported as a failure: on one run it filed 30 batches as
+    "the model's reply was unusable" and downgraded a healthy report to
+    PARTIAL, when the passages actually lost were a reference list and some
+    acknowledgements.
+
+    Treating those two outcomes as one is what made the integrity alarm
+    untrustworthy -- a reader who learns that PARTIAL cries wolf stops reading
+    it.
+    """
+    raw = None
+    if isinstance(reply, list):
+        # Observed live: the model returns a bare list when it has nothing to
+        # report, and {"evidence": [...]} when it does.
+        raw = reply
+    elif isinstance(reply, dict):
+        raw = reply.get("evidence")
+        if not isinstance(raw, list):
+            return [], 0, "unusable"
+    else:
+        return [], 0, "unusable"
 
     # P-numbers in the prompt map to the chunk actually sent under them; the
     # real chunk id is also accepted, since that is what the prompt asks for.
@@ -440,7 +500,15 @@ def _harvest(reply, batch: list[Scored],
                 "source was only partially retrievable, so the claim may rest on unseen text"
 
         accepted.append(record)
-    return accepted, rejected
+    if accepted or rejected:
+        status = "ok"
+    elif raw:
+        # Entries were sent but none was even a usable dict. That is a reply
+        # we cannot read, not a refusal.
+        status = "unusable"
+    else:
+        status = "no_evidence"
+    return accepted, rejected, status
 
 
 def synthesise_sources(

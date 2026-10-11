@@ -745,7 +745,7 @@ def test_metadata_only_evidence_is_capped_and_labelled(monkeypatch):
         "quality": "strong", "confidence": 0.95,
     }]}
 
-    accepted, rejected = extract_module._harvest(reply, [], {"S9#0": chunk})
+    accepted, rejected, _status = extract_module._harvest(reply, [], {"S9#0": chunk})
     assert len(accepted) == 1, "the record itself is still kept"
     record = accepted[0]
 

@@ -193,7 +193,7 @@ def test_harvest_uses_the_real_limitation():
                            "quote": "1.8 seconds to first frame",
                            "quality": "strong", "confidence": 0.9}]}
 
-    accepted, _ = _harvest(reply, [], {"S1#0": chunk})
+    accepted, _, _status = _harvest(reply, [], {"S1#0": chunk})
 
     assert accepted[0].retrieval_limitation == "download hit the byte cap", \
         "the human-readable reason must survive into evidence"
